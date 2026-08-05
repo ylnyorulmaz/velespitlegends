@@ -1,13 +1,31 @@
+const fs = require('fs');
+const path = require('path');
+
+// Load backend/.env without an extra dependency
+const envPath = path.join(__dirname, '.env');
+if (fs.existsSync(envPath)) {
+  for (const line of fs.readFileSync(envPath, 'utf8').split(/\r?\n/)) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eq = trimmed.indexOf('=');
+    if (eq === -1) continue;
+    const key = trimmed.slice(0, eq).trim();
+    const value = trimmed.slice(eq + 1).trim();
+    if (key && process.env[key] === undefined) process.env[key] = value;
+  }
+}
+
 const express = require('express');
 const mongoose = require('mongoose');
 const bodyParser = require('body-parser');
 const cors = require('cors');
-const path = require('path');
 
 const Cyclist = require('./models/Cyclist');
 const Race = require('./models/Race');
 const Team = require('./models/Team');
 const Staff = require('./models/Staff');
+const RaceResult = require('./models/RaceResult');
+const { simulateRace } = require('./services/raceEngine');
 
 const app = express();
 app.use(bodyParser.json());
@@ -16,9 +34,12 @@ app.use(cors());
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost/cycling_management';
 
-mongoose.connect(MONGODB_URI, { useNewUrlParser: true, useUnifiedTopology: true })
+mongoose.connect(MONGODB_URI)
   .then(() => console.log('Connected to MongoDB'))
-  .catch((err) => console.error('MongoDB connection error:', err.message));
+  .catch((err) => {
+    console.error('MongoDB connection error:', err.message);
+    process.exit(1);
+  });
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
@@ -36,9 +57,26 @@ app.post('/api/cyclists', async (req, res) => {
   res.send(cyclist);
 });
 
+// Optional rest day: recover fatigue / nudge form for selected riders
+app.post('/api/cyclists/rest', async (req, res) => {
+  const { cyclistIds } = req.body || {};
+  if (!Array.isArray(cyclistIds) || !cyclistIds.length) {
+    return res.status(400).json({ error: 'cyclistIds[] required' });
+  }
+
+  const cyclists = await Cyclist.find({ _id: { $in: cyclistIds } });
+  for (const rider of cyclists) {
+    rider.fatigue = Math.max(0, (rider.fatigue || 0) - 15);
+    rider.form = Math.min(100, (rider.form || 70) + 2);
+    await rider.save();
+  }
+
+  res.send(cyclists);
+});
+
 // Race routes
 app.get('/api/races', async (req, res) => {
-  const races = await Race.find();
+  const races = await Race.find().sort({ date: 1 });
   res.send(races);
 });
 
@@ -46,6 +84,92 @@ app.post('/api/races', async (req, res) => {
   const race = new Race(req.body);
   await race.save();
   res.send(race);
+});
+
+app.post('/api/races/:id/enter', async (req, res) => {
+  try {
+    const { teamId, cyclistIds } = req.body;
+
+    if (!teamId || !Array.isArray(cyclistIds)) {
+      return res.status(400).json({ error: 'teamId and cyclistIds[] are required' });
+    }
+    if (cyclistIds.length < 3 || cyclistIds.length > 8) {
+      return res.status(400).json({ error: 'Select between 3 and 8 riders' });
+    }
+
+    const race = await Race.findById(req.params.id);
+    if (!race) return res.status(404).json({ error: 'Race not found' });
+
+    const team = await Team.findById(teamId);
+    if (!team) return res.status(404).json({ error: 'Team not found' });
+
+    const riders = await Cyclist.find({ _id: { $in: cyclistIds } });
+    if (riders.length !== cyclistIds.length) {
+      return res.status(400).json({ error: 'One or more cyclists not found' });
+    }
+
+    const rosterSet = new Set(team.roster.map((id) => String(id)));
+    cyclistIds.forEach((id) => rosterSet.add(String(id)));
+    team.roster = Array.from(rosterSet);
+
+    const {
+      standings,
+      summary,
+      narrative,
+      formChanges,
+      teamPointsEarned,
+    } = simulateRace(race, riders, team.name);
+
+    // Persist fatigue/form ticks
+    await Promise.all(riders.map((rider) => rider.save()));
+
+    if (standings[0] && standings[0].isPlayer) {
+      team.wins = (team.wins || 0) + 1;
+    }
+    team.seasonPoints = (team.seasonPoints || 0) + teamPointsEarned;
+    // ranking shown as season points standing (higher = better)
+    team.ranking = team.seasonPoints;
+    await team.save();
+
+    const result = await RaceResult.create({
+      race: race._id,
+      team: team._id,
+      riders: cyclistIds,
+      summary,
+      narrative,
+      standings,
+      formChanges,
+      teamPointsEarned,
+    });
+
+    const populated = await RaceResult.findById(result._id)
+      .populate('race')
+      .populate('team')
+      .populate('riders');
+
+    res.status(201).send(populated);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Results routes
+app.get('/api/results', async (req, res) => {
+  const results = await RaceResult.find()
+    .sort({ createdAt: -1 })
+    .populate('race')
+    .populate('team');
+  res.send(results);
+});
+
+app.get('/api/results/:id', async (req, res) => {
+  const result = await RaceResult.findById(req.params.id)
+    .populate('race')
+    .populate('team')
+    .populate('riders');
+  if (!result) return res.status(404).json({ error: 'Result not found' });
+  res.send(result);
 });
 
 // Team routes
@@ -72,13 +196,49 @@ app.post('/api/staff', async (req, res) => {
   res.send(staffMember);
 });
 
-// Serve static files from the Vue app
-app.use(express.static(path.join(__dirname, '../frontend/dist')));
+// Dashboard summary for home
+app.get('/api/dashboard', async (req, res) => {
+  const teams = await Team.find().sort({ seasonPoints: -1 }).limit(5).populate('roster');
+  const nextRace = await Race.findOne().sort({ date: 1 });
+  const recent = await RaceResult.find()
+    .sort({ createdAt: -1 })
+    .limit(3)
+    .populate('race')
+    .populate('team');
 
-app.get('*', (req, res) => {
-  res.sendFile(path.join(__dirname, '../frontend/dist/index.html'));
+  const topTeam = teams[0] || null;
+  const formSnapshot = topTeam && topTeam.roster
+    ? topTeam.roster.slice(0, 5).map((r) => ({
+      name: r.name,
+      form: r.form,
+      fatigue: r.fatigue,
+    }))
+    : [];
+
+  res.send({
+    topTeams: teams.map((t) => ({
+      _id: t._id,
+      name: t.name,
+      budget: t.budget,
+      wins: t.wins,
+      seasonPoints: t.seasonPoints || 0,
+    })),
+    nextRace,
+    recentResults: recent,
+    formSnapshot,
+  });
 });
 
+// Serve built frontend when available (dev uses webpack on :8080)
+const frontendDist = path.join(__dirname, '../frontend/dist');
+const frontendIndex = path.join(frontendDist, 'index.html');
+if (fs.existsSync(frontendIndex)) {
+  app.use(express.static(frontendDist));
+  app.get('*', (req, res) => {
+    res.sendFile(frontendIndex);
+  });
+}
+
 app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
+  console.log(`Server running on http://localhost:${PORT}`);
 });

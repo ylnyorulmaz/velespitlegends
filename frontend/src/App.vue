@@ -17,10 +17,13 @@
             <router-link to="/races" class="nav-link">Races</router-link>
           </li>
           <li class="nav-item">
-            <router-link to="/staff" class="nav-link">Staff</router-link>
+            <router-link to="/calendar" class="nav-link">Calendar</router-link>
           </li>
           <li class="nav-item">
-            <router-link to="/race-simulation" class="nav-link">Race Simulation</router-link>
+            <router-link to="/results" class="nav-link">Results</router-link>
+          </li>
+          <li class="nav-item">
+            <router-link to="/staff" class="nav-link">Staff</router-link>
           </li>
         </ul>
       </div>
@@ -31,10 +34,6 @@
 
 <script>
 export default {
-  name: 'App'
+  name: 'App',
 };
 </script>
-
-<style>
-/* Add any additional styles here */
-</style>

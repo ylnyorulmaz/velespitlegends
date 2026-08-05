@@ -1,19 +1,100 @@
 <template>
-    <div class="container">
-      <h1>Welcome to Velespit Legends</h1>
-      <p>Manage your team, participate in races, and lead your team to victory!</p>
+  <div class="container home">
+    <h1>Velespit Legends</h1>
+    <p class="lead">Text-based cycling team management. Decisions matter.</p>
+    <p>
+      <router-link to="/calendar" class="btn btn-primary mr-2">Race Calendar</router-link>
+      <router-link to="/results" class="btn btn-outline-secondary">Results</router-link>
+    </p>
+
+    <div class="row text-left mt-4">
+      <div class="col-md-4 mb-3">
+        <h5>Standings</h5>
+        <ul class="list-group" v-if="dashboard.topTeams && dashboard.topTeams.length">
+          <li
+            v-for="t in dashboard.topTeams"
+            :key="t._id"
+            class="list-group-item d-flex justify-content-between"
+          >
+            <span>{{ t.name }}</span>
+            <span>{{ t.seasonPoints || 0 }} pts · {{ t.wins || 0 }} wins</span>
+          </li>
+        </ul>
+        <p v-else class="text-muted">No teams yet.</p>
+      </div>
+
+      <div class="col-md-4 mb-3">
+        <h5>Next race</h5>
+        <div v-if="dashboard.nextRace" class="border rounded p-3">
+          <strong>{{ dashboard.nextRace.name }}</strong>
+          <div>{{ formatDate(dashboard.nextRace.date) }}</div>
+          <div class="text-muted">
+            {{ dashboard.nextRace.profile }} · {{ dashboard.nextRace.distance }} km
+          </div>
+        </div>
+        <p v-else class="text-muted">Add a race to the calendar.</p>
+      </div>
+
+      <div class="col-md-4 mb-3">
+        <h5>Form watch</h5>
+        <ul class="list-group" v-if="dashboard.formSnapshot && dashboard.formSnapshot.length">
+          <li
+            v-for="(r, idx) in dashboard.formSnapshot"
+            :key="idx"
+            class="list-group-item d-flex justify-content-between"
+          >
+            <span>{{ r.name }}</span>
+            <span>F{{ r.form }} / fat {{ r.fatigue }}</span>
+          </li>
+        </ul>
+        <p v-else class="text-muted">Race once to see roster form.</p>
+      </div>
     </div>
-  </template>
-  
-  <script>
-  export default {
-    name: 'HomeManagement'
-  };
-  </script>
-  
-  <style scoped>
-  .container {
-    text-align: center;
-  }
-  </style>
-  
+  </div>
+</template>
+
+<script>
+import axios from 'axios';
+
+export default {
+  name: 'HomeManagement',
+  data() {
+    return {
+      dashboard: {
+        topTeams: [],
+        nextRace: null,
+        formSnapshot: [],
+        recentResults: [],
+      },
+    };
+  },
+  created() {
+    this.load();
+  },
+  methods: {
+    formatDate(value) {
+      if (!value) return 'TBD';
+      return String(value).slice(0, 10);
+    },
+    async load() {
+      try {
+        const { data } = await axios.get('/api/dashboard');
+        this.dashboard = data;
+      } catch (err) {
+        // Keep empty dashboard if API fails
+      }
+    },
+  },
+};
+</script>
+
+<style scoped>
+.home {
+  padding-top: 1.5rem;
+}
+.lead {
+  max-width: 36rem;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
