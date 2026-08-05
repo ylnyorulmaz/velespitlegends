@@ -1,6 +1,10 @@
 <template>
-  <div class="container">
-    <h1>Race Management</h1>
+  <div class="page-container">
+    <PageHeader
+      title="Race Management"
+      subtitle="Schedule one-day races or define custom segment courses."
+      eyebrow="Setup"
+    />
 
     <div class="card mb-4">
       <div class="card-body">
@@ -140,6 +144,7 @@
 
 <script>
 import axios from 'axios';
+import PageHeader from '@/components/PageHeader.vue';
 
 const emptyRace = () => ({
   name: '',
@@ -159,6 +164,7 @@ const emptySegment = (profile = 'flat') => ({
 
 export default {
   name: 'RaceManagement',
+  components: { PageHeader },
   data() {
     return {
       races: [],

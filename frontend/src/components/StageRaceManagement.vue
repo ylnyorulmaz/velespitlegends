@@ -1,7 +1,11 @@
 <template>
-  <div class="container">
-    <h1>Stage Races</h1>
-    <p class="text-muted">Multi-stage tours with a general classification (GC).</p>
+  <div class="page-container">
+    <PageHeader
+      title="Stage Races"
+      subtitle="Create multi-stage tours with a general classification."
+      eyebrow="Tours"
+    />
+    <p class="text-muted mb-4">Multi-stage tours track GC points across linked stages.</p>
 
     <div class="card mb-4">
       <div class="card-body">
@@ -136,6 +140,7 @@
 
 <script>
 import axios from 'axios';
+import PageHeader from '@/components/PageHeader.vue';
 
 const emptyStage = (week) => ({
   name: '',
@@ -146,6 +151,7 @@ const emptyStage = (week) => ({
 
 export default {
   name: 'StageRaceManagement',
+  components: { PageHeader },
   data() {
     return {
       stageRaces: [],

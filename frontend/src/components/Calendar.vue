@@ -1,10 +1,16 @@
 <template>
-  <div class="container">
-    <h1>Race Calendar</h1>
-    <p class="text-muted">Pick a race, your team, rider roles, and 3–8 roster riders, then race.</p>
+  <div class="page-container">
+    <PageHeader
+      title="Race Calendar"
+      subtitle="Pick a race, assign roles, select 3–8 riders, and line up your tactic."
+      eyebrow="Race day"
+    />
 
-    <div v-if="season" class="season-bar card mb-3">
-      <div class="card-body py-2 d-flex flex-wrap justify-content-between align-items-center">
+    <LoadingState v-if="loading" label="Loading calendar…" />
+
+    <template v-else>
+    <div v-if="season" class="season-bar vl-card mb-3">
+      <div class="vl-card-body py-2 d-flex flex-wrap justify-content-between align-items-center">
         <div>
           <strong>Season {{ season.year }}</strong>
           — Week {{ season.currentWeek }} / {{ season.totalWeeks }}
@@ -21,13 +27,20 @@
       </div>
     </div>
 
-    <div v-if="error" class="alert alert-danger">{{ error }}</div>
-    <div v-if="success" class="alert alert-success">{{ success }}</div>
+    <div v-if="error" class="alert alert-danger alert-dismissible fade show">
+      {{ error }}
+      <button type="button" class="close" @click="error = ''"><span>&times;</span></button>
+    </div>
+    <div v-if="success" class="alert alert-success alert-dismissible fade show">
+      {{ success }}
+      <button type="button" class="close" @click="success = ''"><span>&times;</span></button>
+    </div>
     <div v-if="isCurrentEntryCompleted" class="alert alert-secondary">
       This team already completed the selected race. Pick another race or team.
     </div>
 
-    <div class="form-row mb-3">
+    <div class="form-row mb-3 vl-panel">
+      <div class="col-12"><h6 class="text-muted mb-3">Race setup</h6></div>
       <div class="form-group col-md-4">
         <label for="team">Team</label>
         <select id="team" v-model="selectedTeamId" class="form-control" @change="onTeamChange">
@@ -105,8 +118,18 @@
           <strong>{{ c.name }}</strong>
           <span v-if="isInjured(c)" class="badge badge-danger ml-1">{{ injuryLabel(c) }}</span>
         </label>
-        <span>S{{ c.sprint }} C{{ c.climb }} TT{{ c.timeTrial }} E{{ c.endurance }}</span>
-        <span>form {{ c.form }} · fatigue {{ c.fatigue }} · {{ c.specialty }}</span>
+        <span class="rider-meta">form {{ c.form }} · fatigue {{ c.fatigue }}</span>
+        <div class="stat-bars mt-1">
+          <div class="stat-bar-row">
+            <span class="stat-bar-label">S</span>
+            <div class="stat-bar-track"><div class="stat-bar-fill" :style="{ width: $ui.statBarWidth(c.sprint) }" /></div>
+          </div>
+          <div class="stat-bar-row">
+            <span class="stat-bar-label">C</span>
+            <div class="stat-bar-track"><div class="stat-bar-fill" :style="{ width: $ui.statBarWidth(c.climb) }" /></div>
+          </div>
+        </div>
+        <span class="rider-meta">{{ c.specialty }}</span>
         <select
           v-if="isSelected(c._id)"
           v-model="riderRoles[c._id]"
@@ -148,40 +171,57 @@
     </div>
 
     <button
-      class="btn btn-primary"
+      class="btn btn-primary btn-lg"
       :disabled="submitting || !canEnter"
       @click="enterRace"
     >
-      {{ submitting ? 'Racing…' : 'Enter Race' }}
+      <span v-if="submitting" class="spinner-border spinner-border-sm mr-1" role="status" />
+      {{ submitting ? 'Simulating race…' : 'Enter race' }}
     </button>
 
-    <hr class="my-4">
-    <h4>Upcoming / all races</h4>
-    <ul class="list-group">
+    <section class="mt-5">
+      <h5 class="mb-3">Season calendar</h5>
+      <div class="vl-card">
+    <ul class="list-group list-group-flush">
       <li
         v-for="r in races"
         :key="'list-' + r._id"
-        class="list-group-item"
-        :class="{ 'list-group-item-secondary': isRaceCompletedForTeam(r._id) }"
+        class="list-group-item vl-list-item"
+        :class="{ 'bg-light': isRaceCompletedForTeam(r._id) }"
       >
-        <strong>{{ r.name }}</strong>
-        — {{ formatDate(r.date) }}
-        — {{ r.distance }} km · {{ r.profile }} · prestige {{ r.prestige }} · week {{ r.seasonWeek || 1 }}
-        <span v-if="r.stageNumber" class="badge badge-primary ml-1">Stage {{ r.stageNumber }}</span>
-        <span v-if="isRaceLocked(r)" class="badge badge-warning ml-2">locked</span>
-        <span v-if="isRaceCompletedForTeam(r._id)" class="badge badge-success ml-2">completed</span>
+        <div>
+          <strong>{{ r.name }}</strong>
+          <div class="small text-muted mt-1">
+            {{ formatDate(r.date) }}
+            · {{ r.distance }} km
+            · <span :class="'profile-pill ' + $ui.profileBadgeClass(r.profile)">{{ r.profile }}</span>
+            · week {{ r.seasonWeek || 1 }}
+          </div>
+        </div>
+        <div>
+          <span v-if="r.stageNumber" class="badge badge-primary mr-1">S{{ r.stageNumber }}</span>
+          <span v-if="isRaceLocked(r)" class="badge badge-warning mr-1">locked</span>
+          <span v-if="isRaceCompletedForTeam(r._id)" class="badge badge-success">done</span>
+        </div>
       </li>
     </ul>
+      </div>
+    </section>
+    </template>
   </div>
 </template>
 
 <script>
 import axios from 'axios';
+import PageHeader from '@/components/PageHeader.vue';
+import LoadingState from '@/components/LoadingState.vue';
 
 export default {
   name: 'Calendar',
+  components: { PageHeader, LoadingState },
   data() {
     return {
+      loading: true,
       races: [],
       teams: [],
       cyclists: [],
@@ -349,6 +389,8 @@ export default {
       }
     },
     async load() {
+      this.loading = true;
+      try {
       const [races, teams, cyclists, tactics, roles, season] = await Promise.all([
         axios.get('/api/races'),
         axios.get('/api/teams'),
@@ -370,6 +412,9 @@ export default {
         this.selectedRaceId = this.races.find(
           (r) => !this.isRaceCompletedForTeam(r._id),
         )?._id || this.races[0]._id;
+      }
+      } finally {
+        this.loading = false;
       }
     },
     async enterRace() {
@@ -398,49 +443,3 @@ export default {
   },
 };
 </script>
-
-<style scoped>
-.rider-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 0.75rem;
-}
-.rider-card {
-  display: flex;
-  flex-direction: column;
-  gap: 0.15rem;
-  border: 1px solid #ced4da;
-  border-radius: 4px;
-  padding: 0.75rem;
-  cursor: pointer;
-  font-size: 0.9rem;
-}
-.rider-card.selected {
-  border-color: #007bff;
-  background: #eef5ff;
-}
-.rider-select {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  margin-bottom: 0.25rem;
-  cursor: pointer;
-}
-.rest-grid {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 0.5rem 1rem;
-  font-size: 0.85rem;
-}
-.rest-rider {
-  margin: 0;
-  cursor: pointer;
-}
-.rider-card.injured {
-  opacity: 0.75;
-  background: #fff5f5;
-}
-.season-bar {
-  max-width: 48rem;
-}
-</style>
