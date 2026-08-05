@@ -25,7 +25,13 @@ const Race = require('./models/Race');
 const Team = require('./models/Team');
 const Staff = require('./models/Staff');
 const RaceResult = require('./models/RaceResult');
-const { simulateRace, staffTacticBonus } = require('./services/raceEngine');
+const {
+  simulateRace,
+  staffTacticBonus,
+  TACTICS,
+  normalizeTactic,
+  validateRaceSegments,
+} = require('./services/raceEngine');
 
 const app = express();
 app.use(bodyParser.json());
@@ -75,20 +81,51 @@ app.post('/api/cyclists/rest', async (req, res) => {
 });
 
 // Race routes
+app.get('/api/tactics', (req, res) => {
+  res.send(TACTICS);
+});
+
 app.get('/api/races', async (req, res) => {
   const races = await Race.find().sort({ date: 1 });
   res.send(races);
 });
 
 app.post('/api/races', async (req, res) => {
+  const segmentError = validateRaceSegments(req.body.distance, req.body.segments);
+  if (segmentError) {
+    return res.status(400).json({ error: segmentError });
+  }
   const race = new Race(req.body);
   await race.save();
   res.send(race);
 });
 
+app.put('/api/races/:id', async (req, res) => {
+  try {
+    const race = await Race.findById(req.params.id);
+    if (!race) return res.status(404).json({ error: 'Race not found' });
+
+    const payload = { ...req.body };
+    if (payload.segments && payload.segments.length) {
+      const segmentError = validateRaceSegments(payload.distance ?? race.distance, payload.segments);
+      if (segmentError) {
+        return res.status(400).json({ error: segmentError });
+      }
+    } else if (payload.segments && !payload.segments.length) {
+      payload.segments = [];
+    }
+
+    Object.assign(race, payload);
+    await race.save();
+    res.send(race);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.post('/api/races/:id/enter', async (req, res) => {
   try {
-    const { teamId, cyclistIds } = req.body;
+    const { teamId, cyclistIds, tactic: rawTactic } = req.body;
 
     if (!teamId || !Array.isArray(cyclistIds)) {
       return res.status(400).json({ error: 'teamId and cyclistIds[] are required' });
@@ -124,7 +161,8 @@ app.post('/api/races/:id/enter', async (req, res) => {
     }
 
     const staffBonus = staffTacticBonus(team.staff || []);
-    const seed = `${race._id}-${teamId}-${race.date || ''}`;
+    const tactic = normalizeTactic(rawTactic);
+    const seed = `${race._id}-${teamId}-${race.date || ''}-${tactic}`;
 
     const rosterSet = new Set(team.roster.map((id) => String(id)));
     cyclistIds.forEach((id) => rosterSet.add(String(id)));
@@ -137,7 +175,7 @@ app.post('/api/races/:id/enter', async (req, res) => {
       formChanges,
       teamPointsEarned,
       segmentLog,
-    } = simulateRace(race, riders, team.name, { teamId, seed, staffBonus });
+    } = simulateRace(race, riders, team.name, { teamId, seed, staffBonus, tactic });
 
     // Persist fatigue/form ticks
     await Promise.all(riders.map((rider) => rider.save()));
@@ -157,6 +195,7 @@ app.post('/api/races/:id/enter', async (req, res) => {
       summary,
       narrative,
       segmentLog,
+      tactic,
       standings,
       formChanges,
       teamPointsEarned,

@@ -1,5 +1,93 @@
 const POINTS = [25, 20, 16, 14, 12, 10, 8, 6, 4, 2];
 
+const TACTICS = {
+  balanced: {
+    label: 'Balanced',
+    description: 'Standard racing — no special bonuses or penalties.',
+  },
+  control: {
+    label: 'Control the peloton',
+    description: 'Steady tempo; your riders resist being dropped on climbs.',
+  },
+  attack: {
+    label: 'Attack',
+    description: 'Aggressive racing with bonuses on hilly, mountain, and classic segments.',
+  },
+  defend: {
+    label: 'Defend',
+    description: 'Protect positions; lower drop risk, slightly slower on flat roads.',
+  },
+  sprint_train: {
+    label: 'Sprint train',
+    description: 'Organise for a bunch sprint — big bonus on the final flat segment.',
+  },
+  climb_pace: {
+    label: 'Climb pace',
+    description: 'Hard tempo on climbs — bonus on hilly and mountain segments.',
+  },
+};
+
+const VALID_TACTICS = Object.keys(TACTICS);
+
+const RANDOM_EVENTS = {
+  flat_tire: {
+    kind: 'negative',
+    scoreDelta: -12,
+    fatigueDelta: 8,
+    drop: false,
+    message: (name) => `${name} punctures and loses time at the roadside.`,
+  },
+  mechanical: {
+    kind: 'negative',
+    scoreDelta: -10,
+    fatigueDelta: 6,
+    drop: false,
+    message: (name) => `${name} suffers a mechanical and slips back.`,
+  },
+  crash: {
+    kind: 'negative',
+    scoreDelta: -20,
+    fatigueDelta: 15,
+    drop: true,
+    message: (name) => `${name} crashes and is left behind the peloton.`,
+  },
+  illness: {
+    kind: 'negative',
+    scoreDelta: -8,
+    fatigueDelta: 12,
+    drop: false,
+    message: (name) => `${name} is struggling with sudden stomach cramps.`,
+  },
+  tailwind: {
+    kind: 'positive',
+    scoreDelta: 8,
+    fatigueDelta: -4,
+    drop: false,
+    message: (name) => `${name} catches a tailwind and surges forward.`,
+  },
+  perfect_pacing: {
+    kind: 'positive',
+    scoreDelta: 6,
+    fatigueDelta: -6,
+    drop: false,
+    message: (name) => `${name} nails the pacing and moves up effortlessly.`,
+  },
+  second_wind: {
+    kind: 'positive',
+    scoreDelta: 11,
+    fatigueDelta: -10,
+    drop: false,
+    message: (name) => `${name} finds a second wind on the climb.`,
+  },
+  lucky_break: {
+    kind: 'positive',
+    scoreDelta: 9,
+    fatigueDelta: 0,
+    drop: false,
+    message: (name) => `${name} slips through a gap as rivals hesitate.`,
+  },
+};
+
 const RIVAL_NAMES = [
   'Luca Verdon', 'Jonas Kite', 'Mateo Rivas', 'Erik Holm', 'Piotr Vale',
   'Samir Costa', 'Nils Berger', 'Hugo March', 'Kenji Arai', 'Owen Blake',
@@ -123,17 +211,118 @@ function buildSegments(race) {
   return segments;
 }
 
+function normalizeTactic(tactic) {
+  const key = String(tactic || 'balanced').toLowerCase();
+  return VALID_TACTICS.includes(key) ? key : 'balanced';
+}
+
+function tacticSegmentBonus(competitor, segmentProfile, tactic, segmentMeta = {}) {
+  if (!competitor.isPlayer) return 0;
+
+  const teamwork = num(competitor.teamwork);
+  const climb = num(competitor.climb);
+  const sprint = num(competitor.sprint);
+  const specialty = competitor.specialty || 'none';
+  const isClimbSegment = segmentProfile === 'hilly' || segmentProfile === 'mountain';
+  const isFlatSegment = segmentProfile === 'flat';
+  const isClassic = segmentProfile === 'classic';
+
+  switch (tactic) {
+    case 'control':
+      return teamwork * 0.12 + (isClimbSegment ? 3 : 0);
+    case 'attack':
+      if (isClimbSegment || isClassic) {
+        return (specialty === 'breakaway' ? 8 : 4) + teamwork * 0.05;
+      }
+      return 0;
+    case 'defend':
+      return isFlatSegment ? -2 : (isClimbSegment ? 4 : 1);
+    case 'sprint_train':
+      if (segmentMeta.isLastSegment && isFlatSegment) {
+        return (specialty === 'leadout' || specialty === 'none' ? 10 : 6) + sprint * 0.06;
+      }
+      return isFlatSegment ? sprint * 0.03 : 0;
+    case 'climb_pace':
+      if (isClimbSegment) {
+        return (climb >= 75 ? 9 : 5) + climb * 0.04;
+      }
+      return 0;
+    default:
+      return 0;
+  }
+}
+
+function dropThreshold(tactic, hardSegment) {
+  if (!hardSegment) return 0.84;
+  if (tactic === 'defend') return 0.76;
+  if (tactic === 'control') return 0.80;
+  if (tactic === 'attack') return 0.88;
+  return 0.84;
+}
+
+function rollRandomEvents(active, segment, context) {
+  const { rng, tactic } = context;
+  const hardSegment = segment.profile === 'mountain' || segment.profile === 'hilly' || segment.profile === 'classic';
+  const eventChance = (0.12 + (hardSegment ? 0.05 : 0)) * (tactic === 'attack' ? 1.15 : 1);
+  const eventCount = rng() < eventChance ? 1 : (rng() < eventChance * 0.3 ? 2 : 0);
+
+  if (!eventCount || !active.length) {
+    return { events: [], randomEvents: [] };
+  }
+
+  const eventKeys = Object.keys(RANDOM_EVENTS);
+  const randomEvents = [];
+  const applied = new Set();
+
+  for (let i = 0; i < eventCount; i += 1) {
+    const pool = active.filter((c) => !c.dropped);
+    if (!pool.length) break;
+
+    const target = pool[Math.floor(rng() * pool.length)];
+    const targetKey = target.name + target.isPlayer;
+    if (applied.has(targetKey) && pool.length > 1) continue;
+    applied.add(targetKey);
+
+    const positiveBias = target.isPlayer ? 0.4 : 0.32;
+    const wantPositive = rng() < positiveBias;
+    const candidates = eventKeys.filter((key) => RANDOM_EVENTS[key].kind === (wantPositive ? 'positive' : 'negative'));
+    const eventKey = candidates[Math.floor(rng() * candidates.length)] || eventKeys[0];
+    const def = RANDOM_EVENTS[eventKey];
+
+    target.segmentMod = target.segmentMod || { scoreDelta: 0, fatigueDelta: 0, forceDrop: false };
+    target.segmentMod.scoreDelta += def.scoreDelta;
+    target.segmentMod.fatigueDelta += def.fatigueDelta;
+    if (def.drop) target.segmentMod.forceDrop = true;
+
+    randomEvents.push({
+      type: eventKey,
+      kind: def.kind,
+      rider: target.name,
+      isPlayer: target.isPlayer,
+      scoreDelta: def.scoreDelta,
+      message: def.message(target.name),
+    });
+  }
+
+  return {
+    events: randomEvents.map((event) => event.message),
+    randomEvents,
+  };
+}
+
 function segmentScore(competitor, segmentProfile, context) {
-  const { rng, staffBonus = 0 } = context;
+  const { rng, staffBonus = 0, tactic = 'balanced', segmentMeta = {} } = context;
   const roll = typeof rng === 'function' ? rng() : Math.random();
   const skill = profileSkill(competitor, segmentProfile);
   const form = num(competitor.form, 70);
   const fatigue = num(competitor.fatigue, 20);
-  const variance = roll * 5;
+  const varianceRoll = tactic === 'attack' ? roll * 7 : roll * 5;
   const staffBoost = competitor.isPlayer ? staffBonus * 0.015 : 0;
   const dropPenalty = competitor.dropped ? -20 : 0;
+  const tacticBoost = tacticSegmentBonus(competitor, segmentProfile, tactic, segmentMeta);
+  const eventBoost = competitor.segmentMod ? num(competitor.segmentMod.scoreDelta, 0) : 0;
 
-  return skill * 0.78 + form * 0.12 - fatigue * 0.22 + variance + staffBoost + dropPenalty;
+  return skill * 0.78 + form * 0.12 - fatigue * 0.22 + varianceRoll + staffBoost + dropPenalty + tacticBoost + eventBoost;
 }
 
 function toCompetitor(rider, meta = {}) {
@@ -182,6 +371,12 @@ function resolveSegment(competitors, segment, kmEnd, totalDistance, context) {
   const weight = segment.km / totalDistance;
   const events = [];
 
+  active.forEach((competitor) => {
+    competitor.segmentMod = { scoreDelta: 0, fatigueDelta: 0, forceDrop: false };
+  });
+
+  const randomRoll = rollRandomEvents(active, segment, context);
+
   const scored = active.map((competitor) => ({
     competitor,
     score: segmentScore(competitor, segment.profile, context),
@@ -190,17 +385,22 @@ function resolveSegment(competitors, segment, kmEnd, totalDistance, context) {
   scored.sort((a, b) => b.score - a.score);
   const average = scored.reduce((sum, row) => sum + row.score, 0) / (scored.length || 1);
   const hardSegment = segment.profile === 'mountain' || segment.profile === 'hilly';
+  const dropCutoff = dropThreshold(context.tactic, hardSegment);
 
   scored.forEach(({ competitor, score }, index) => {
     competitor.cumulativeScore += score * weight;
 
     const fatigueTick = segment.km / 22 + (hardSegment ? 2 : 0);
-    competitor.fatigue = clamp(Math.round(competitor.fatigue + fatigueTick), 0, 100);
+    const eventFatigue = competitor.segmentMod ? num(competitor.segmentMod.fatigueDelta, 0) : 0;
+    competitor.fatigue = clamp(Math.round(competitor.fatigue + fatigueTick + eventFatigue), 0, 100);
 
-    if (
+    if (competitor.segmentMod && competitor.segmentMod.forceDrop && !competitor.dropped) {
+      competitor.dropped = true;
+      events.push(`${competitor.name} is out of contention after the incident.`);
+    } else if (
       hardSegment
       && index >= Math.floor(scored.length * 0.55)
-      && score < average * 0.84
+      && score < average * dropCutoff
       && !competitor.dropped
     ) {
       competitor.dropped = true;
@@ -239,6 +439,7 @@ function resolveSegment(competitors, segment, kmEnd, totalDistance, context) {
     leader: leader.competitor.name,
     leaderIsPlayer: leader.competitor.isPlayer,
     events,
+    randomEvents: randomRoll.randomEvents,
     topThree: scored.slice(0, 3).map((row) => ({
       name: row.competitor.name,
       score: Math.round(row.score * 10) / 10,
@@ -247,15 +448,21 @@ function resolveSegment(competitors, segment, kmEnd, totalDistance, context) {
   };
 }
 
-function buildNarrativeFromSegments(race, segmentLog, standings, teamName, staffBonus) {
+function buildNarrativeFromSegments(race, segmentLog, standings, teamName, staffBonus, tactic) {
   const winner = standings[0];
   const bestPlayer = standings.find((row) => row.isPlayer);
+  const tacticInfo = TACTICS[tactic];
 
   const lines = [`${race.name} unfolds over ${num(race.distance, 180)} km.`];
+
+  if (tacticInfo && tactic !== 'balanced') {
+    lines.push(`${teamName} races with a ${tacticInfo.label.toLowerCase()} plan.`);
+  }
 
   segmentLog.forEach((segment) => {
     lines.push(segment.events[0]);
     segment.events.slice(1).forEach((event) => lines.push(event));
+    (segment.randomEvents || []).forEach((event) => lines.push(event.message));
   });
 
   lines.push(`${winner.name} wins${winner.isPlayer ? ` for ${teamName}` : ''}.`);
@@ -323,10 +530,10 @@ function applyConditionTick(riders, standings, race, competitors) {
 
 function simulateRace(race, riders, teamName, options = {}) {
   const teamId = options.teamId || 'team';
-  const seed = options.seed || `${race._id}-${teamId}-${race.date || ''}`;
+  const tactic = normalizeTactic(options.tactic);
+  const seed = options.seed || `${race._id}-${teamId}-${race.date || ''}-${tactic}`;
   const rng = createRng(seed);
   const staffBonus = options.staffBonus || 0;
-  const context = { rng, race, staffBonus };
 
   const segments = buildSegments(race);
   const totalDistance = segments.reduce((sum, segment) => sum + segment.km, 0);
@@ -339,8 +546,18 @@ function simulateRace(race, riders, teamName, options = {}) {
   const segmentLog = [];
   let kmCursor = 0;
 
-  segments.forEach((segment) => {
+  segments.forEach((segment, index) => {
     kmCursor += segment.km;
+    const context = {
+      rng,
+      race,
+      staffBonus,
+      tactic,
+      segmentMeta: {
+        isLastSegment: index === segments.length - 1,
+        segmentIndex: index,
+      },
+    };
     segmentLog.push(resolveSegment(competitors, segment, kmCursor, totalDistance, context));
   });
 
@@ -359,7 +576,7 @@ function simulateRace(race, riders, teamName, options = {}) {
     row.points = POINTS[index] || 0;
   });
 
-  const narrative = buildNarrativeFromSegments(race, segmentLog, standings, teamName, staffBonus);
+  const narrative = buildNarrativeFromSegments(race, segmentLog, standings, teamName, staffBonus, tactic);
   const formChanges = applyConditionTick(riders, standings, race, competitors);
   const teamPointsEarned = standings
     .filter((row) => row.isPlayer)
@@ -380,8 +597,19 @@ function simulateRace(race, riders, teamName, options = {}) {
     segmentLog,
     segments,
     seed,
+    tactic,
     staffBonus: Math.round(staffBonus * 10) / 10,
   };
+}
+
+function validateRaceSegments(distance, segments) {
+  if (!segments || !segments.length) return null;
+  const total = segments.reduce((sum, segment) => sum + num(segment.km, 0), 0);
+  const target = num(distance, 0);
+  if (total !== target) {
+    return `Segment km total (${total}) must match race distance (${target})`;
+  }
+  return null;
 }
 
 // Legacy helper kept for tests / tooling
@@ -397,4 +625,8 @@ module.exports = {
   raceDifficulty,
   buildSegments,
   raceDayScore,
+  TACTICS,
+  VALID_TACTICS,
+  normalizeTactic,
+  validateRaceSegments,
 };

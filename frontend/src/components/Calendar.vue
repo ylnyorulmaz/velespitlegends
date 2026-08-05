@@ -10,7 +10,7 @@
     </div>
 
     <div class="form-row mb-3">
-      <div class="form-group col-md-6">
+      <div class="form-group col-md-4">
         <label for="team">Team</label>
         <select id="team" v-model="selectedTeamId" class="form-control" @change="onTeamChange">
           <option disabled value="">Select team</option>
@@ -19,7 +19,7 @@
           </option>
         </select>
       </div>
-      <div class="form-group col-md-6">
+      <div class="form-group col-md-4">
         <label for="race">Race</label>
         <select id="race" v-model="selectedRaceId" class="form-control">
           <option disabled value="">Select race</option>
@@ -33,6 +33,17 @@
             {{ isRaceCompletedForTeam(r._id) ? ' ✓ done' : '' }}
           </option>
         </select>
+      </div>
+      <div class="form-group col-md-4">
+        <label for="tactic">Team tactic</label>
+        <select id="tactic" v-model="selectedTactic" class="form-control">
+          <option v-for="(info, key) in tactics" :key="key" :value="key">
+            {{ info.label }}
+          </option>
+        </select>
+        <small v-if="tactics[selectedTactic]" class="form-text text-muted">
+          {{ tactics[selectedTactic].description }}
+        </small>
       </div>
     </div>
 
@@ -106,6 +117,8 @@ export default {
       selectedRaceId: '',
       selectedTeamId: '',
       selectedRiderIds: [],
+      selectedTactic: 'balanced',
+      tactics: {},
       submitting: false,
       error: '',
       success: '',
@@ -171,14 +184,16 @@ export default {
       this.selectedRiderIds = [...this.selectedRiderIds, id];
     },
     async load() {
-      const [races, teams, cyclists] = await Promise.all([
+      const [races, teams, cyclists, tactics] = await Promise.all([
         axios.get('/api/races'),
         axios.get('/api/teams'),
         axios.get('/api/cyclists'),
+        axios.get('/api/tactics'),
       ]);
       this.races = races.data;
       this.teams = teams.data;
       this.cyclists = cyclists.data;
+      this.tactics = tactics.data;
       if (this.teams.length && !this.selectedTeamId) {
         this.selectedTeamId = this.teams[0]._id;
       }
@@ -197,6 +212,7 @@ export default {
         const { data } = await axios.post(`/api/races/${this.selectedRaceId}/enter`, {
           teamId: this.selectedTeamId,
           cyclistIds: this.selectedRiderIds,
+          tactic: this.selectedTactic,
         });
         this.success = 'Race finished — opening result…';
         this.$router.push(`/results/${data._id}`);

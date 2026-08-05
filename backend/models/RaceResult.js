@@ -41,6 +41,14 @@ const SegmentLogSchema = new mongoose.Schema({
   leader: String,
   leaderIsPlayer: { type: Boolean, default: false },
   events: [String],
+  randomEvents: [{
+    type: String,
+    kind: String,
+    rider: String,
+    isPlayer: { type: Boolean, default: false },
+    scoreDelta: Number,
+    message: String,
+  }],
   topThree: [SegmentTopSchema],
 }, { _id: false });
 
@@ -62,6 +70,10 @@ const RaceResultSchema = new mongoose.Schema({
   summary: { type: String, default: '' },
   narrative: [String],
   segmentLog: [SegmentLogSchema],
+  tactic: {
+    type: String,
+    default: 'balanced',
+  },
   standings: [StandingSchema],
   formChanges: [FormChangeSchema],
   teamPointsEarned: { type: Number, default: 0 },

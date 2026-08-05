@@ -13,6 +13,9 @@
       <p class="text-muted" v-if="detail.race">
         {{ detail.race.profile }} · {{ detail.race.distance }} km
         · team pts +{{ detail.teamPointsEarned || 0 }}
+        <span v-if="detail.tactic && detail.tactic !== 'balanced'">
+          · tactic: {{ tacticLabel(detail.tactic) }}
+        </span>
       </p>
 
       <div
@@ -59,6 +62,20 @@
               <ul v-if="segment.events && segment.events.length > 1" class="segment-events small mb-2 mt-2">
                 <li v-for="(event, eIdx) in segment.events.slice(1)" :key="eIdx">{{ event }}</li>
               </ul>
+              <div
+                v-if="segment.randomEvents && segment.randomEvents.length"
+                class="random-events small mb-2"
+              >
+                <div
+                  v-for="(event, rIdx) in segment.randomEvents"
+                  :key="'re-' + rIdx"
+                  class="random-event"
+                  :class="event.kind === 'positive' ? 'event-positive' : 'event-negative'"
+                >
+                  {{ event.message }}
+                  <span v-if="event.isPlayer" class="badge badge-info ml-1">you</span>
+                </div>
+              </div>
               <div v-if="segment.topThree && segment.topThree.length" class="segment-top small text-muted">
                 Top 3:
                 <span
@@ -170,6 +187,7 @@ export default {
     return {
       results: [],
       detail: null,
+      tactics: {},
     };
   },
   watch: {
@@ -220,7 +238,15 @@ export default {
       };
       return map[profile] || 'badge-secondary';
     },
+    tacticLabel(key) {
+      if (this.tactics[key]) return this.tactics[key].label;
+      return key;
+    },
     async load() {
+      if (!Object.keys(this.tactics).length) {
+        const { data } = await axios.get('/api/tactics');
+        this.tactics = data;
+      }
       const id = this.$route.params.id;
       if (id) {
         const { data } = await axios.get(`/api/results/${id}`);
@@ -267,5 +293,18 @@ export default {
 }
 .segment-events li {
   margin-bottom: 0.15rem;
+}
+.random-event {
+  padding: 0.25rem 0.5rem;
+  border-radius: 4px;
+  margin-bottom: 0.25rem;
+}
+.event-positive {
+  background: #d4edda;
+  color: #155724;
+}
+.event-negative {
+  background: #f8d7da;
+  color: #721c24;
 }
 </style>
