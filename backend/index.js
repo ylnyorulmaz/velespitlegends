@@ -136,6 +136,7 @@ app.post('/api/races/:id/enter', async (req, res) => {
       narrative,
       formChanges,
       teamPointsEarned,
+      segmentLog,
     } = simulateRace(race, riders, team.name, { teamId, seed, staffBonus });
 
     // Persist fatigue/form ticks
@@ -155,6 +156,7 @@ app.post('/api/races/:id/enter', async (req, res) => {
       riders: cyclistIds,
       summary,
       narrative,
+      segmentLog,
       standings,
       formChanges,
       teamPointsEarned,
