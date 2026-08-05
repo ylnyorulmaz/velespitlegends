@@ -1,15 +1,18 @@
 <template>
   <div class="container">
     <h1>Race Calendar</h1>
-    <p class="text-muted">Pick a race, your team, and 3–8 riders, then race.</p>
+    <p class="text-muted">Pick a race, your team, and 3–8 roster riders, then race.</p>
 
     <div v-if="error" class="alert alert-danger">{{ error }}</div>
     <div v-if="success" class="alert alert-success">{{ success }}</div>
+    <div v-if="isCurrentEntryCompleted" class="alert alert-secondary">
+      This team already completed the selected race. Pick another race or team.
+    </div>
 
     <div class="form-row mb-3">
       <div class="form-group col-md-6">
         <label for="team">Team</label>
-        <select id="team" v-model="selectedTeamId" class="form-control">
+        <select id="team" v-model="selectedTeamId" class="form-control" @change="onTeamChange">
           <option disabled value="">Select team</option>
           <option v-for="t in teams" :key="t._id" :value="t._id">
             {{ t.name }} (wins {{ t.wins || 0 }})
@@ -20,20 +23,34 @@
         <label for="race">Race</label>
         <select id="race" v-model="selectedRaceId" class="form-control">
           <option disabled value="">Select race</option>
-          <option v-for="r in races" :key="r._id" :value="r._id">
+          <option
+            v-for="r in races"
+            :key="r._id"
+            :value="r._id"
+            :disabled="isRaceCompletedForTeam(r._id)"
+          >
             {{ formatDate(r.date) }} — {{ r.name }} ({{ r.profile }}, {{ r.distance }} km)
+            {{ isRaceCompletedForTeam(r._id) ? ' ✓ done' : '' }}
           </option>
         </select>
       </div>
     </div>
 
     <h5>Select riders ({{ selectedRiderIds.length }}/8)</h5>
-    <div v-if="!cyclists.length" class="alert alert-warning">
-      No cyclists yet. Create some under Cyclists first.
+    <div v-if="!availableCyclists.length" class="alert alert-warning">
+      <span v-if="selectedTeam && selectedTeam.roster && selectedTeam.roster.length">
+        No roster riders found. Add cyclists to this team first (enter a race once to attach them).
+      </span>
+      <span v-else-if="!cyclists.length">
+        No cyclists yet. Create some under Cyclists first.
+      </span>
+      <span v-else>
+        This team has no roster yet — showing all cyclists. They will join the roster after the race.
+      </span>
     </div>
     <div class="rider-grid mb-3">
       <label
-        v-for="c in cyclists"
+        v-for="c in availableCyclists"
         :key="c._id"
         class="rider-card"
         :class="{ selected: isSelected(c._id) }"
@@ -61,10 +78,16 @@
     <hr class="my-4">
     <h4>Upcoming / all races</h4>
     <ul class="list-group">
-      <li v-for="r in races" :key="'list-' + r._id" class="list-group-item">
+      <li
+        v-for="r in races"
+        :key="'list-' + r._id"
+        class="list-group-item"
+        :class="{ 'list-group-item-secondary': isRaceCompletedForTeam(r._id) }"
+      >
         <strong>{{ r.name }}</strong>
         — {{ formatDate(r.date) }}
         — {{ r.distance }} km · {{ r.profile }} · prestige {{ r.prestige }}
+        <span v-if="isRaceCompletedForTeam(r._id)" class="badge badge-success ml-2">completed</span>
       </li>
     </ul>
   </div>
@@ -89,12 +112,26 @@ export default {
     };
   },
   computed: {
+    selectedTeam() {
+      return this.teams.find((t) => t._id === this.selectedTeamId) || null;
+    },
+    availableCyclists() {
+      if (!this.selectedTeam || !this.selectedTeam.roster || !this.selectedTeam.roster.length) {
+        return this.cyclists;
+      }
+      const rosterIds = new Set(this.selectedTeam.roster.map((r) => String(r._id || r)));
+      return this.cyclists.filter((c) => rosterIds.has(String(c._id)));
+    },
+    isCurrentEntryCompleted() {
+      return this.isRaceCompletedForTeam(this.selectedRaceId);
+    },
     canEnter() {
       return (
         this.selectedRaceId
         && this.selectedTeamId
         && this.selectedRiderIds.length >= 3
         && this.selectedRiderIds.length <= 8
+        && !this.isCurrentEntryCompleted
       );
     },
   },
@@ -105,6 +142,18 @@ export default {
     formatDate(value) {
       if (!value) return 'TBD';
       return String(value).slice(0, 10);
+    },
+    isRaceCompletedForTeam(raceId) {
+      if (!raceId || !this.selectedTeamId) return false;
+      const race = this.races.find((r) => r._id === raceId);
+      if (!race || !race.completedEntries) return false;
+      return race.completedEntries.some(
+        (entry) => String(entry.team) === String(this.selectedTeamId),
+      );
+    },
+    onTeamChange() {
+      this.selectedRiderIds = [];
+      this.error = '';
     },
     isSelected(id) {
       return this.selectedRiderIds.includes(id);
@@ -134,7 +183,9 @@ export default {
         this.selectedTeamId = this.teams[0]._id;
       }
       if (this.races.length && !this.selectedRaceId) {
-        this.selectedRaceId = this.races[0]._id;
+        this.selectedRaceId = this.races.find(
+          (r) => !this.isRaceCompletedForTeam(r._id),
+        )?._id || this.races[0]._id;
       }
     },
     async enterRace() {

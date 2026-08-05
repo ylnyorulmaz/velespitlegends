@@ -25,7 +25,7 @@ const Race = require('./models/Race');
 const Team = require('./models/Team');
 const Staff = require('./models/Staff');
 const RaceResult = require('./models/RaceResult');
-const { simulateRace } = require('./services/raceEngine');
+const { simulateRace, staffTacticBonus } = require('./services/raceEngine');
 
 const app = express();
 app.use(bodyParser.json());
@@ -100,13 +100,31 @@ app.post('/api/races/:id/enter', async (req, res) => {
     const race = await Race.findById(req.params.id);
     if (!race) return res.status(404).json({ error: 'Race not found' });
 
-    const team = await Team.findById(teamId);
+    const team = await Team.findById(teamId).populate('staff');
     if (!team) return res.status(404).json({ error: 'Team not found' });
+
+    const alreadyCompleted = (race.completedEntries || []).some(
+      (entry) => String(entry.team) === String(teamId),
+    );
+    if (alreadyCompleted) {
+      return res.status(400).json({ error: 'This team already completed this race' });
+    }
 
     const riders = await Cyclist.find({ _id: { $in: cyclistIds } });
     if (riders.length !== cyclistIds.length) {
       return res.status(400).json({ error: 'One or more cyclists not found' });
     }
+
+    const rosterIds = (team.roster || []).map((id) => String(id));
+    if (rosterIds.length > 0) {
+      const offRoster = cyclistIds.filter((id) => !rosterIds.includes(String(id)));
+      if (offRoster.length) {
+        return res.status(400).json({ error: 'All selected riders must be on the team roster' });
+      }
+    }
+
+    const staffBonus = staffTacticBonus(team.staff || []);
+    const seed = `${race._id}-${teamId}-${race.date || ''}`;
 
     const rosterSet = new Set(team.roster.map((id) => String(id)));
     cyclistIds.forEach((id) => rosterSet.add(String(id)));
@@ -118,7 +136,7 @@ app.post('/api/races/:id/enter', async (req, res) => {
       narrative,
       formChanges,
       teamPointsEarned,
-    } = simulateRace(race, riders, team.name);
+    } = simulateRace(race, riders, team.name, { teamId, seed, staffBonus });
 
     // Persist fatigue/form ticks
     await Promise.all(riders.map((rider) => rider.save()));
@@ -141,6 +159,14 @@ app.post('/api/races/:id/enter', async (req, res) => {
       formChanges,
       teamPointsEarned,
     });
+
+    race.completedEntries = race.completedEntries || [];
+    race.completedEntries.push({
+      team: team._id,
+      result: result._id,
+      completedAt: new Date(),
+    });
+    await race.save();
 
     const populated = await RaceResult.findById(result._id)
       .populate('race')

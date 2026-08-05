@@ -3,5 +3,3 @@
  * (c) 2014-2023 Evan You
  * Released under the MIT License.
  */
-
-/*! p5.js v1.11.13 April 08, 2026 */
