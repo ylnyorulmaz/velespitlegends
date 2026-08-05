@@ -27,6 +27,23 @@ const FormChangeSchema = new mongoose.Schema({
   fatigueDelta: Number,
 }, { _id: false });
 
+const SegmentTopSchema = new mongoose.Schema({
+  name: String,
+  score: Number,
+  isPlayer: { type: Boolean, default: false },
+}, { _id: false });
+
+const SegmentLogSchema = new mongoose.Schema({
+  kmStart: Number,
+  kmEnd: Number,
+  profile: String,
+  label: String,
+  leader: String,
+  leaderIsPlayer: { type: Boolean, default: false },
+  events: [String],
+  topThree: [SegmentTopSchema],
+}, { _id: false });
+
 const RaceResultSchema = new mongoose.Schema({
   race: {
     type: mongoose.Schema.Types.ObjectId,
@@ -44,6 +61,7 @@ const RaceResultSchema = new mongoose.Schema({
   }],
   summary: { type: String, default: '' },
   narrative: [String],
+  segmentLog: [SegmentLogSchema],
   standings: [StandingSchema],
   formChanges: [FormChangeSchema],
   teamPointsEarned: { type: Number, default: 0 },

@@ -10,6 +10,14 @@ const RaceSchema = new mongoose.Schema({
     default: 'flat',
   },
   prestige: { type: Number, default: 50, min: 1, max: 100 },
+  segments: [{
+    km: Number,
+    profile: {
+      type: String,
+      enum: ['flat', 'hilly', 'mountain', 'classic', 'tt'],
+    },
+    label: String,
+  }],
   completedEntries: [{
     team: { type: mongoose.Schema.Types.ObjectId, ref: 'Team' },
     result: { type: mongoose.Schema.Types.ObjectId, ref: 'RaceResult' },

@@ -14,7 +14,6 @@ function num(value, fallback = 50) {
   return Number.isFinite(n) ? n : fallback;
 }
 
-/** Deterministic PRNG from a string seed (same seed → same race outcome). */
 function createRng(seedString) {
   let h = 2166136261;
   const str = String(seedString);
@@ -70,21 +69,89 @@ function profileSkill(rider, profile) {
   }
 }
 
-function raceDayScore(rider, profile, context = {}) {
-  const { rng = Math.random, race, staffBonus = 0 } = context;
+function buildSegments(race) {
+  if (race.segments && race.segments.length) {
+    return race.segments.map((segment) => ({
+      km: num(segment.km, 10),
+      profile: segment.profile || race.profile || 'flat',
+      label: segment.label || segment.profile,
+    }));
+  }
+
+  const distance = num(race.distance, 180);
+  const profile = race.profile || 'flat';
+
+  const templates = {
+    flat: [
+      { ratio: 0.55, profile: 'flat', label: 'Rolling roads' },
+      { ratio: 0.25, profile: 'flat', label: 'Wind echelons' },
+      { ratio: 0.20, profile: 'flat', label: 'Sprint finish' },
+    ],
+    hilly: [
+      { ratio: 0.4, profile: 'flat', label: 'Opening phase' },
+      { ratio: 0.35, profile: 'hilly', label: 'Middle climbs' },
+      { ratio: 0.25, profile: 'hilly', label: 'Final uphill drag' },
+    ],
+    mountain: [
+      { ratio: 0.3, profile: 'flat', label: 'Valley roads' },
+      { ratio: 0.25, profile: 'hilly', label: 'Approach climbs' },
+      { ratio: 0.35, profile: 'mountain', label: 'High mountains' },
+      { ratio: 0.1, profile: 'flat', label: 'Descent to the line' },
+    ],
+    classic: [
+      { ratio: 0.35, profile: 'flat', label: 'Neutralised start' },
+      { ratio: 0.4, profile: 'classic', label: 'Cobbles and crosswinds' },
+      { ratio: 0.25, profile: 'hilly', label: 'Final punch' },
+    ],
+    tt: [
+      { ratio: 1, profile: 'tt', label: 'Full time trial' },
+    ],
+  };
+
+  const parts = templates[profile] || templates.flat;
+  const segments = parts.map((part) => ({
+    km: Math.max(1, Math.round(distance * part.ratio)),
+    profile: part.profile,
+    label: part.label,
+  }));
+
+  const total = segments.reduce((sum, segment) => sum + segment.km, 0);
+  if (total !== distance && segments.length) {
+    segments[segments.length - 1].km += distance - total;
+  }
+
+  return segments;
+}
+
+function segmentScore(competitor, segmentProfile, context) {
+  const { rng, staffBonus = 0 } = context;
   const roll = typeof rng === 'function' ? rng() : Math.random();
+  const skill = profileSkill(competitor, segmentProfile);
+  const form = num(competitor.form, 70);
+  const fatigue = num(competitor.fatigue, 20);
+  const variance = roll * 5;
+  const staffBoost = competitor.isPlayer ? staffBonus * 0.015 : 0;
+  const dropPenalty = competitor.dropped ? -20 : 0;
 
-  const skill = profileSkill(rider, profile);
-  const form = num(rider.form, 70);
-  const fatigue = num(rider.fatigue, 20);
-  const teamwork = num(rider.teamwork);
+  return skill * 0.78 + form * 0.12 - fatigue * 0.22 + variance + staffBoost + dropPenalty;
+}
 
-  const difficulty = raceDifficulty(race);
-  const varianceMax = clamp(12 - difficulty * 4, 4, 10);
-  const variance = roll * varianceMax;
-  const staffBoost = staffBonus * 0.03;
-
-  return skill * 0.72 + form * 0.2 + teamwork * 0.05 - fatigue * 0.28 + variance + staffBoost;
+function toCompetitor(rider, meta = {}) {
+  return {
+    name: rider.name || 'Unknown rider',
+    cyclist: meta.cyclist !== undefined ? meta.cyclist : rider._id || null,
+    isPlayer: Boolean(meta.isPlayer),
+    specialty: rider.specialty || 'none',
+    sprint: num(rider.sprint),
+    climb: num(rider.climb),
+    timeTrial: num(rider.timeTrial),
+    endurance: num(rider.endurance),
+    form: num(rider.form, 70),
+    fatigue: num(rider.fatigue, 20),
+    teamwork: num(rider.teamwork),
+    cumulativeScore: 0,
+    dropped: false,
+  };
 }
 
 function makeRivals(profile, rng, count = 8) {
@@ -110,50 +177,94 @@ function makeRivals(profile, rng, count = 8) {
   });
 }
 
-function buildNarrative(race, standings, teamName, staffBonus) {
-  const profile = race.profile || 'flat';
-  const distance = race.distance || 180;
+function resolveSegment(competitors, segment, kmEnd, totalDistance, context) {
+  const active = competitors.filter((c) => !c.dropped);
+  const weight = segment.km / totalDistance;
+  const events = [];
+
+  const scored = active.map((competitor) => ({
+    competitor,
+    score: segmentScore(competitor, segment.profile, context),
+  }));
+
+  scored.sort((a, b) => b.score - a.score);
+  const average = scored.reduce((sum, row) => sum + row.score, 0) / (scored.length || 1);
+  const hardSegment = segment.profile === 'mountain' || segment.profile === 'hilly';
+
+  scored.forEach(({ competitor, score }, index) => {
+    competitor.cumulativeScore += score * weight;
+
+    const fatigueTick = segment.km / 22 + (hardSegment ? 2 : 0);
+    competitor.fatigue = clamp(Math.round(competitor.fatigue + fatigueTick), 0, 100);
+
+    if (
+      hardSegment
+      && index >= Math.floor(scored.length * 0.55)
+      && score < average * 0.84
+      && !competitor.dropped
+    ) {
+      competitor.dropped = true;
+      events.push(`${competitor.name} is dropped on ${segment.label.toLowerCase()}.`);
+    }
+  });
+
+  const leader = scored[0];
+  const kmStart = kmEnd - segment.km;
+  const leaderLine = `km ${kmStart}–${kmEnd} (${segment.label}): ${leader.competitor.name} leads the segment.`;
+  events.unshift(leaderLine);
+
+  const playerInSegment = scored.find((row) => row.competitor.isPlayer);
+  if (
+    playerInSegment
+    && playerInSegment.competitor.specialty === 'breakaway'
+    && playerInSegment === leader
+  ) {
+    events.push(`${playerInSegment.competitor.name} sails clear in the break.`);
+  }
+
+  if (
+    segment.profile === 'classic'
+    && playerInSegment
+    && playerInSegment.competitor.specialty === 'cobbles'
+    && playerInSegment.score >= average * 1.05
+  ) {
+    events.push(`${playerInSegment.competitor.name} handles the pavé near the front.`);
+  }
+
+  return {
+    kmStart,
+    kmEnd,
+    profile: segment.profile,
+    label: segment.label,
+    leader: leader.competitor.name,
+    leaderIsPlayer: leader.competitor.isPlayer,
+    events,
+    topThree: scored.slice(0, 3).map((row) => ({
+      name: row.competitor.name,
+      score: Math.round(row.score * 10) / 10,
+      isPlayer: row.competitor.isPlayer,
+    })),
+  };
+}
+
+function buildNarrativeFromSegments(race, segmentLog, standings, teamName, staffBonus) {
   const winner = standings[0];
   const bestPlayer = standings.find((row) => row.isPlayer);
-  const playerLeader = standings.filter((row) => row.isPlayer).slice(0, 2);
 
-  const openers = {
-    flat: `The bunch stays glued through the first ${Math.round(distance * 0.4)} km of ${race.name}.`,
-    hilly: `Early rollers on ${race.name} already stretch the peloton.`,
-    mountain: `The road tilts up and the mountain men move forward on ${race.name}.`,
-    classic: `Crosswinds and rough roads shred the race at ${race.name}.`,
-    tt: `One by one, riders roll down the ramp at ${race.name}.`,
-  };
+  const lines = [`${race.name} unfolds over ${num(race.distance, 180)} km.`];
 
-  const middles = {
-    flat: `${playerLeader[0] ? playerLeader[0].name : 'A domestique'} tries to keep the sprinters calm into the final circuit.`,
-    hilly: `A sharp climb with ${Math.round(distance * 0.2)} km left blows the front group apart.`,
-    mountain: `On the decisive ascent, pure climbing watts decide who survives.`,
-    classic: `Cobbles and fatigue punish anyone short on endurance.`,
-    tt: `Splits appear against the clock; aero position and power win the day.`,
-  };
+  segmentLog.forEach((segment) => {
+    lines.push(segment.events[0]);
+    segment.events.slice(1).forEach((event) => lines.push(event));
+  });
 
-  if (profile === 'classic' && bestPlayer && bestPlayer.specialtyHint === 'cobbles') {
-    middles.classic = `${bestPlayer.name} thrives on the pavé and stays near the front.`;
+  lines.push(`${winner.name} wins${winner.isPlayer ? ` for ${teamName}` : ''}.`);
+
+  if (bestPlayer) {
+    lines.push(`${teamName} best: ${bestPlayer.name} in P${bestPlayer.position} (${bestPlayer.points} pts).`);
+  } else {
+    lines.push(`${teamName} fails to place a rider.`);
   }
-  if (profile === 'mountain' && bestPlayer) {
-    middles.mountain = `${bestPlayer.name} sets a hard tempo on the steepest slopes.`;
-  }
-  if (profile === 'flat' && bestPlayer) {
-    middles.flat = `${bestPlayer.name} fights for the wheels into the final kilometre.`;
-  }
-
-  const finale = `${winner.name} takes the win${winner.isPlayer ? ` for ${teamName}` : ''}.`;
-  const teamLine = bestPlayer
-    ? `${teamName} best: ${bestPlayer.name} in P${bestPlayer.position} (${bestPlayer.points} pts).`
-    : `${teamName} fails to place a rider.`;
-
-  const lines = [
-    openers[profile] || openers.flat,
-    middles[profile] || middles.hilly,
-    finale,
-    teamLine,
-  ];
 
   if (staffBonus > 0) {
     lines.push(`The ${teamName} staff setup added a small edge in the decisive phase.`);
@@ -162,12 +273,19 @@ function buildNarrative(race, standings, teamName, staffBonus) {
   return lines;
 }
 
-function applyConditionTick(riders, standings, race) {
+function applyConditionTick(riders, standings, race, competitors) {
   const distance = num(race.distance, 180);
   const prestige = num(race.prestige, 50);
   const changes = [];
 
   for (const rider of riders) {
+    const competitor = competitors.find(
+      (c) => c.isPlayer && String(c.cyclist) === String(rider._id),
+    );
+    if (competitor) {
+      rider.fatigue = competitor.fatigue;
+    }
+
     const row = standings.find((s) => s.isPlayer && String(s.cyclist) === String(rider._id));
     const position = row ? row.position : 99;
     const formBefore = num(rider.form, 70);
@@ -183,7 +301,7 @@ function applyConditionTick(riders, standings, race) {
     formDelta -= Math.floor(raceLoad / 6);
 
     const formAfter = clamp(Math.round(formBefore + formDelta), 1, 100);
-    const fatigueAfter = clamp(Math.round(fatigueBefore + raceLoad), 0, 100);
+    const fatigueAfter = clamp(Math.round(fatigueBefore + raceLoad * 0.35), 0, 100);
 
     changes.push({
       cyclist: rider._id,
@@ -204,39 +322,45 @@ function applyConditionTick(riders, standings, race) {
 }
 
 function simulateRace(race, riders, teamName, options = {}) {
-  const profile = race.profile || 'flat';
   const teamId = options.teamId || 'team';
   const seed = options.seed || `${race._id}-${teamId}-${race.date || ''}`;
   const rng = createRng(seed);
   const staffBonus = options.staffBonus || 0;
-  const scoreContext = { rng, race, staffBonus };
+  const context = { rng, race, staffBonus };
 
-  const playerRows = riders.map((rider) => ({
-    name: rider.name || 'Unknown rider',
-    cyclist: rider._id,
-    isPlayer: true,
-    specialtyHint: rider.specialty || 'none',
-    score: raceDayScore(rider, profile, scoreContext),
-  }));
+  const segments = buildSegments(race);
+  const totalDistance = segments.reduce((sum, segment) => sum + segment.km, 0);
 
-  const rivalRows = makeRivals(profile, rng).map((rival) => ({
-    name: rival.name,
-    cyclist: null,
-    isPlayer: false,
-    specialtyHint: 'none',
-    score: raceDayScore(rival, profile, { rng, race, staffBonus: 0 }),
-  }));
+  const competitors = [
+    ...riders.map((rider) => toCompetitor(rider, { isPlayer: true, cyclist: rider._id })),
+    ...makeRivals(race.profile || 'flat', rng).map((rival) => toCompetitor(rival, { isPlayer: false })),
+  ];
 
-  const standings = [...playerRows, ...rivalRows].sort((a, b) => b.score - a.score);
+  const segmentLog = [];
+  let kmCursor = 0;
+
+  segments.forEach((segment) => {
+    kmCursor += segment.km;
+    segmentLog.push(resolveSegment(competitors, segment, kmCursor, totalDistance, context));
+  });
+
+  const standings = competitors
+    .map((competitor) => ({
+      name: competitor.name,
+      cyclist: competitor.cyclist,
+      isPlayer: competitor.isPlayer,
+      score: Math.round(competitor.cumulativeScore * 10) / 10,
+      dropped: competitor.dropped,
+    }))
+    .sort((a, b) => b.score - a.score);
 
   standings.forEach((row, index) => {
     row.position = index + 1;
-    row.score = Math.round(row.score * 10) / 10;
     row.points = POINTS[index] || 0;
   });
 
-  const narrative = buildNarrative(race, standings, teamName, staffBonus);
-  const formChanges = applyConditionTick(riders, standings, race);
+  const narrative = buildNarrativeFromSegments(race, segmentLog, standings, teamName, staffBonus);
+  const formChanges = applyConditionTick(riders, standings, race, competitors);
   const teamPointsEarned = standings
     .filter((row) => row.isPlayer)
     .reduce((sum, row) => sum + (row.points || 0), 0);
@@ -244,7 +368,7 @@ function simulateRace(race, riders, teamName, options = {}) {
   const summary = narrative.join(' ');
 
   standings.forEach((row) => {
-    delete row.specialtyHint;
+    delete row.dropped;
   });
 
   return {
@@ -253,9 +377,16 @@ function simulateRace(race, riders, teamName, options = {}) {
     summary,
     formChanges,
     teamPointsEarned,
+    segmentLog,
+    segments,
     seed,
     staffBonus: Math.round(staffBonus * 10) / 10,
   };
+}
+
+// Legacy helper kept for tests / tooling
+function raceDayScore(rider, profile, scoreContext = {}) {
+  return segmentScore(toCompetitor(rider, { isPlayer: true }), profile, scoreContext);
 }
 
 module.exports = {
@@ -264,4 +395,6 @@ module.exports = {
   createRng,
   staffTacticBonus,
   raceDifficulty,
+  buildSegments,
+  raceDayScore,
 };
