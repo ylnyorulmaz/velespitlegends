@@ -51,11 +51,11 @@ export default {
   },
   methods: {
     async fetchCyclists() {
-      const response = await axios.get('http://localhost:3000/api/cyclists');
+      const response = await axios.get('/api/cyclists');
       this.cyclists = response.data;
     },
     async addCyclist() {
-      const response = await axios.post('http://localhost:3000/api/cyclists', this.cyclist);
+      const response = await axios.post('/api/cyclists', this.cyclist);
       this.cyclists.push(response.data);
       this.cyclist = {
         name: '',
