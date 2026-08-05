@@ -1,7 +1,8 @@
 {
   "name": "velespitlegends",
   "type": "container",
-  "language": "docker",
-  "dockerfilePath": "./Dockerfile",
+  "language": "nodejs",
+  "buildCommand": "npm run build",
+  "startCommand": "npm start",
   "healthCheckPath": "/health"
 }
