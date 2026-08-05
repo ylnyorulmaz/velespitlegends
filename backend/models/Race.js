@@ -10,6 +10,11 @@ const RaceSchema = new mongoose.Schema({
     default: 'flat',
   },
   prestige: { type: Number, default: 50, min: 1, max: 100 },
+  completedEntries: [{
+    team: { type: mongoose.Schema.Types.ObjectId, ref: 'Team' },
+    result: { type: mongoose.Schema.Types.ObjectId, ref: 'RaceResult' },
+    completedAt: { type: Date, default: Date.now },
+  }],
 });
 
 module.exports = mongoose.model('Race', RaceSchema);
