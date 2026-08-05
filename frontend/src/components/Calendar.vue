@@ -66,6 +66,11 @@
       </div>
     </div>
 
+    <div v-if="selectedRace && selectedRace.stageRace" class="alert alert-info py-2">
+      Stage race stage {{ selectedRace.stageNumber }}
+      <span v-if="selectedRace.stageNumber > 1"> — complete previous stage first</span>
+    </div>
+
     <div v-if="isSelectedRaceLocked" class="alert alert-warning">
       This race opens in week {{ selectedRace.seasonWeek }}. Advance the season to race it.
     </div>
@@ -87,16 +92,18 @@
         v-for="c in availableCyclists"
         :key="c._id"
         class="rider-card"
-        :class="{ selected: isSelected(c._id) }"
+        :class="{ selected: isSelected(c._id), injured: isInjured(c) }"
       >
         <label class="rider-select">
           <input
             type="checkbox"
             :value="c._id"
             :checked="isSelected(c._id)"
+            :disabled="isInjured(c)"
             @change="toggleRider(c._id)"
           >
           <strong>{{ c.name }}</strong>
+          <span v-if="isInjured(c)" class="badge badge-danger ml-1">{{ injuryLabel(c) }}</span>
         </label>
         <span>S{{ c.sprint }} C{{ c.climb }} TT{{ c.timeTrial }} E{{ c.endurance }}</span>
         <span>form {{ c.form }} · fatigue {{ c.fatigue }} · {{ c.specialty }}</span>
@@ -160,6 +167,7 @@
         <strong>{{ r.name }}</strong>
         — {{ formatDate(r.date) }}
         — {{ r.distance }} km · {{ r.profile }} · prestige {{ r.prestige }} · week {{ r.seasonWeek || 1 }}
+        <span v-if="r.stageNumber" class="badge badge-primary ml-1">Stage {{ r.stageNumber }}</span>
         <span v-if="isRaceLocked(r)" class="badge badge-warning ml-2">locked</span>
         <span v-if="isRaceCompletedForTeam(r._id)" class="badge badge-success ml-2">completed</span>
       </li>
@@ -252,6 +260,16 @@ export default {
       if (!race || !this.season) return false;
       return (race.seasonWeek || 1) > this.season.currentWeek;
     },
+    isInjured(cyclist) {
+      return cyclist.injured
+        || (cyclist.injury && cyclist.injury.type !== 'none' && (cyclist.injury.weeksRemaining || 0) > 0);
+    },
+    injuryLabel(cyclist) {
+      if (!this.isInjured(cyclist)) return '';
+      const weeks = cyclist.injury && cyclist.injury.weeksRemaining;
+      const type = cyclist.injury && cyclist.injury.type === 'crash' ? 'crash' : 'illness';
+      return `${type} ${weeks}w`;
+    },
     onTeamChange() {
       this.selectedRiderIds = [];
       this.riderRoles = {};
@@ -262,6 +280,11 @@ export default {
       return this.selectedRiderIds.includes(id);
     },
     toggleRider(id) {
+      const cyclist = this.cyclists.find((c) => c._id === id);
+      if (cyclist && this.isInjured(cyclist)) {
+        this.error = `${cyclist.name} is injured and cannot race.`;
+        return;
+      }
       if (this.isSelected(id)) {
         this.selectedRiderIds = this.selectedRiderIds.filter((x) => x !== id);
         const nextRoles = { ...this.riderRoles };
@@ -412,6 +435,10 @@ export default {
 .rest-rider {
   margin: 0;
   cursor: pointer;
+}
+.rider-card.injured {
+  opacity: 0.75;
+  background: #fff5f5;
 }
 .season-bar {
   max-width: 48rem;

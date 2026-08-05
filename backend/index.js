@@ -25,6 +25,7 @@ const Race = require('./models/Race');
 const Team = require('./models/Team');
 const Staff = require('./models/Staff');
 const RaceResult = require('./models/RaceResult');
+const StageRace = require('./models/StageRace');
 const {
   simulateRace,
   staffTacticBonus,
@@ -33,8 +34,25 @@ const {
   normalizeTactic,
   normalizeRoles,
   validateRaceSegments,
+  createRng,
 } = require('./services/raceEngine');
 const { getOrCreateSeason, advanceSeasonWeek } = require('./services/seasonService');
+const {
+  isInjured,
+  extractInjuriesFromSegmentLog,
+  applyInjuries,
+  computeMarketValue,
+} = require('./services/injuryService');
+const {
+  updateStageRaceGc,
+  isStageUnlockedForTeam,
+  createStageRaceWithStages,
+} = require('./services/stageRaceService');
+const {
+  listMarketCyclists,
+  signCyclist,
+  releaseCyclist,
+} = require('./services/transferService');
 
 const app = express();
 app.use(bodyParser.json());
@@ -56,8 +74,12 @@ app.get('/health', (req, res) => {
 
 // Cyclist routes
 app.get('/api/cyclists', async (req, res) => {
-  const cyclists = await Cyclist.find();
-  res.send(cyclists);
+  const cyclists = await Cyclist.find().populate('team');
+  res.send(cyclists.map((cyclist) => ({
+    ...cyclist.toObject(),
+    marketValue: computeMarketValue(cyclist),
+    injured: isInjured(cyclist),
+  })));
 });
 
 app.post('/api/cyclists', async (req, res) => {
@@ -75,12 +97,75 @@ app.post('/api/cyclists/rest', async (req, res) => {
 
   const cyclists = await Cyclist.find({ _id: { $in: cyclistIds } });
   for (const rider of cyclists) {
+    if (isInjured(rider)) continue;
     rider.fatigue = Math.max(0, (rider.fatigue || 0) - 15);
     rider.form = Math.min(100, (rider.form || 70) + 2);
     await rider.save();
   }
 
   res.send(cyclists);
+});
+
+// Transfer market
+app.get('/api/transfers/market', async (req, res) => {
+  const market = await listMarketCyclists();
+  res.send(market);
+});
+
+app.post('/api/transfers/sign', async (req, res) => {
+  try {
+    const { teamId, cyclistId } = req.body;
+    if (!teamId || !cyclistId) {
+      return res.status(400).json({ error: 'teamId and cyclistId are required' });
+    }
+    const result = await signCyclist(teamId, cyclistId);
+    res.status(201).send(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/transfers/release', async (req, res) => {
+  try {
+    const { teamId, cyclistId } = req.body;
+    if (!teamId || !cyclistId) {
+      return res.status(400).json({ error: 'teamId and cyclistId are required' });
+    }
+    const result = await releaseCyclist(teamId, cyclistId);
+    res.send(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// Stage races
+app.get('/api/stage-races', async (req, res) => {
+  const stageRaces = await StageRace.find().sort({ createdAt: -1 }).populate('gcStandings.team');
+  res.send(stageRaces);
+});
+
+app.get('/api/stage-races/:id', async (req, res) => {
+  const stageRace = await StageRace.findById(req.params.id).populate('gcStandings.team');
+  if (!stageRace) return res.status(404).json({ error: 'Stage race not found' });
+
+  const stages = await Race.find({ stageRace: stageRace._id }).sort({ stageNumber: 1 });
+  res.send({ stageRace, stages });
+});
+
+app.post('/api/stage-races', async (req, res) => {
+  try {
+    const segmentChecks = (req.body.stages || []).map(
+      (stage) => validateRaceSegments(stage.distance, stage.segments),
+    ).filter(Boolean);
+    if (segmentChecks.length) {
+      return res.status(400).json({ error: segmentChecks[0] });
+    }
+
+    const created = await createStageRaceWithStages(req.body);
+    res.status(201).send(created);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
 });
 
 // Season routes
@@ -221,9 +306,21 @@ app.post('/api/races/:id/enter', async (req, res) => {
       });
     }
 
+    const stageUnlock = await isStageUnlockedForTeam(race, teamId);
+    if (!stageUnlock.ok) {
+      return res.status(400).json({ error: stageUnlock.error });
+    }
+
     const riders = await Cyclist.find({ _id: { $in: cyclistIds } });
     if (riders.length !== cyclistIds.length) {
       return res.status(400).json({ error: 'One or more cyclists not found' });
+    }
+
+    const injuredRiders = riders.filter((rider) => isInjured(rider));
+    if (injuredRiders.length) {
+      return res.status(400).json({
+        error: `Injured riders cannot start: ${injuredRiders.map((r) => r.name).join(', ')}`,
+      });
     }
 
     const rosterIds = (team.roster || []).map((id) => String(id));
@@ -254,8 +351,19 @@ app.post('/api/races/:id/enter', async (req, res) => {
       riderRoles,
     } = simulateRace(race, riders, team.name, { teamId, seed, staffBonus, tactic, roles });
 
-    // Persist fatigue/form ticks
-    await Promise.all(riders.map((rider) => rider.save()));
+    const injuryRng = createRng(`${seed}-injuries`);
+    const injuryPayload = extractInjuriesFromSegmentLog(segmentLog, riders, injuryRng);
+    const injuriesApplied = await applyInjuries(injuryPayload);
+
+    // Persist fatigue/form ticks (injured riders may also have updated form from applyInjuries)
+    await Promise.all(riders.map(async (rider) => {
+      const refreshed = await Cyclist.findById(rider._id);
+      if (refreshed && !isInjured(refreshed)) {
+        refreshed.fatigue = rider.fatigue;
+        refreshed.form = rider.form;
+        await refreshed.save();
+      }
+    }));
 
     if (standings[0] && standings[0].isPlayer) {
       team.wins = (team.wins || 0) + 1;
@@ -277,6 +385,15 @@ app.post('/api/races/:id/enter', async (req, res) => {
       standings,
       formChanges,
       teamPointsEarned,
+      injuriesApplied: injuriesApplied.map((rider) => ({
+        cyclist: rider._id,
+        name: rider.name,
+        type: rider.injury.type,
+        weeksRemaining: rider.injury.weeksRemaining,
+        description: rider.injury.description,
+      })),
+      stageRace: race.stageRace || null,
+      stageNumber: race.stageNumber || null,
     });
 
     race.completedEntries = race.completedEntries || [];
@@ -286,6 +403,10 @@ app.post('/api/races/:id/enter', async (req, res) => {
       completedAt: new Date(),
     });
     await race.save();
+
+    if (race.stageRace) {
+      await updateStageRaceGc(race.stageRace, team._id, race, result);
+    }
 
     const populated = await RaceResult.findById(result._id)
       .populate('race')

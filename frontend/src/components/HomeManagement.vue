@@ -8,6 +8,8 @@
     <p>
       <router-link to="/calendar" class="btn btn-primary mr-2">Race Calendar</router-link>
       <router-link to="/standings" class="btn btn-outline-primary mr-2">Standings</router-link>
+      <router-link to="/transfers" class="btn btn-outline-primary mr-2">Transfers</router-link>
+      <router-link to="/stage-races" class="btn btn-outline-primary mr-2">Stage Races</router-link>
       <router-link to="/results" class="btn btn-outline-secondary">Results</router-link>
     </p>
 

@@ -11,6 +11,12 @@ const RaceSchema = new mongoose.Schema({
   },
   prestige: { type: Number, default: 50, min: 1, max: 100 },
   seasonWeek: { type: Number, min: 1, default: 1 },
+  stageRace: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'StageRace',
+    default: null,
+  },
+  stageNumber: { type: Number, min: 1, default: null },
   segments: [{
     km: Number,
     profile: {

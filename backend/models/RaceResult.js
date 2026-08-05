@@ -85,6 +85,19 @@ const RaceResultSchema = new mongoose.Schema({
   standings: [StandingSchema],
   formChanges: [FormChangeSchema],
   teamPointsEarned: { type: Number, default: 0 },
+  injuriesApplied: [{
+    cyclist: { type: mongoose.Schema.Types.ObjectId, ref: 'Cyclist' },
+    name: String,
+    type: String,
+    weeksRemaining: Number,
+    description: String,
+  }],
+  stageRace: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'StageRace',
+    default: null,
+  },
+  stageNumber: { type: Number, default: null },
   createdAt: { type: Date, default: Date.now },
 });
 

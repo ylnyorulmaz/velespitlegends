@@ -32,10 +32,14 @@ async function advanceSeasonWeek() {
     await rider.save();
   }));
 
+  const { tickInjuryRecovery } = require('./injuryService');
+  const injuryTick = await tickInjuryRecovery();
+
   return {
     season,
     message: `Advanced to week ${season.currentWeek}. All riders recovered slightly.`,
     ridersRecovered: cyclists.length,
+    injuryRecovery: injuryTick,
   };
 }
 

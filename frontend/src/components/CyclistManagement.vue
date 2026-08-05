@@ -52,6 +52,11 @@
         ({{ c.age }}) — S{{ c.sprint }} / C{{ c.climb }} / TT{{ c.timeTrial }} / E{{ c.endurance }}
         — form {{ c.form }}, fatigue {{ c.fatigue }}
         — {{ c.specialty }} — ${{ c.salary }}
+        <span v-if="c.team && c.team.name" class="text-muted"> · {{ c.team.name }}</span>
+        <span v-else class="badge badge-secondary ml-1">free agent</span>
+        <span v-if="c.injured || (c.injury && c.injury.weeksRemaining)" class="badge badge-danger ml-1">
+          injured {{ c.injury && c.injury.weeksRemaining }}w
+        </span>
       </li>
     </ul>
   </div>

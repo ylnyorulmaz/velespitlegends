@@ -18,6 +18,19 @@
         </span>
       </p>
 
+      <div v-if="detail.stageNumber" class="alert alert-info py-2">
+        Stage {{ detail.stageNumber }} of a stage race
+      </div>
+
+      <div v-if="detail.injuriesApplied && detail.injuriesApplied.length" class="alert alert-warning mb-3">
+        <h5 class="alert-heading">Injuries after race</h5>
+        <ul class="mb-0">
+          <li v-for="(inj, idx) in detail.injuriesApplied" :key="idx">
+            <strong>{{ inj.name }}</strong> — {{ inj.description }} ({{ inj.weeksRemaining }} week(s) out)
+          </li>
+        </ul>
+      </div>
+
       <div v-if="detail.riderRoles && detail.riderRoles.length" class="mb-3">
         <h5>Team roles</h5>
         <div class="role-tags">

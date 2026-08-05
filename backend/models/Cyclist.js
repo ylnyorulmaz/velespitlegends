@@ -17,6 +17,20 @@ const CyclistSchema = new mongoose.Schema({
     default: 'none',
   },
   teamwork: { type: Number, default: 50, min: 1, max: 100 },
+  team: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Team',
+    default: null,
+  },
+  injury: {
+    type: {
+      type: String,
+      enum: ['none', 'crash', 'illness'],
+      default: 'none',
+    },
+    weeksRemaining: { type: Number, default: 0, min: 0 },
+    description: { type: String, default: '' },
+  },
 });
 
 module.exports = mongoose.model('Cyclist', CyclistSchema);
