@@ -1,0 +1,7 @@
+{
+  "name": "velespitlegends",
+  "type": "container",
+  "language": "docker",
+  "dockerfilePath": "./Dockerfile",
+  "healthCheckPath": "/health"
+}
