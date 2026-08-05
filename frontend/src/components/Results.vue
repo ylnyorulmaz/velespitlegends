@@ -1,22 +1,23 @@
 <template>
-  <div class="container">
-    <h1>Race Results</h1>
+  <div class="page-container">
+    <PageHeader
+      v-if="!detail"
+      title="Race Results"
+      subtitle="Full race reports, segment timelines, and standings."
+      eyebrow="History"
+    />
 
-    <div v-if="detail">
-      <p>
-        <router-link to="/results">← All results</router-link>
+    <LoadingState v-if="loading" label="Loading results…" />
+
+    <div v-else-if="detail">
+      <p class="mb-3">
+        <router-link to="/results" class="btn btn-sm btn-outline-secondary">← All results</router-link>
       </p>
-      <h3>
-        {{ detail.race && detail.race.name }}
-        <small class="text-muted" v-if="detail.team">— {{ detail.team.name }}</small>
-      </h3>
-      <p class="text-muted" v-if="detail.race">
-        {{ detail.race.profile }} · {{ detail.race.distance }} km
-        · team pts +{{ detail.teamPointsEarned || 0 }}
-        <span v-if="detail.tactic && detail.tactic !== 'balanced'">
-          · tactic: {{ tacticLabel(detail.tactic) }}
-        </span>
-      </p>
+      <PageHeader
+        :title="detail.race && detail.race.name"
+        :subtitle="resultSubtitle"
+        eyebrow="Race report"
+      />
 
       <div v-if="detail.stageNumber" class="alert alert-info py-2">
         Stage {{ detail.stageNumber }} of a stage race
@@ -177,45 +178,71 @@
       </div>
     </div>
 
-    <div v-else>
-      <div v-if="!results.length" class="alert alert-secondary">
-        No results yet. Enter a race from the Calendar.
-      </div>
-      <ul class="list-group">
+    <div v-else-if="!loading">
+      <EmptyState
+        v-if="!results.length"
+        icon="🏁"
+        title="No results yet"
+        message="Enter a race from the Calendar to see your first report."
+      >
+        <router-link to="/calendar" class="btn btn-primary">Go to calendar</router-link>
+      </EmptyState>
+      <div v-else class="vl-card">
+      <ul class="list-group list-group-flush">
         <li
           v-for="r in results"
           :key="r._id"
-          class="list-group-item d-flex justify-content-between align-items-center"
+          class="list-group-item vl-list-item"
         >
           <div>
             <strong>{{ r.race && r.race.name }}</strong>
-            — {{ r.team && r.team.name }}
-            <span v-if="r.teamPointsEarned != null" class="text-muted">
-              (+{{ r.teamPointsEarned }} pts)
-            </span>
-            <div class="small text-muted">{{ formatDate(r.createdAt) }}</div>
+            <div class="small text-muted">
+              {{ r.team && r.team.name }}
+              · +{{ r.teamPointsEarned || 0 }} pts
+              · {{ $ui.formatDateTime(r.createdAt) }}
+            </div>
           </div>
           <router-link class="btn btn-sm btn-outline-primary" :to="`/results/${r._id}`">
-            View
+            View report
           </router-link>
         </li>
       </ul>
+      </div>
     </div>
   </div>
 </template>
 
 <script>
 import axios from 'axios';
+import PageHeader from '@/components/PageHeader.vue';
+import LoadingState from '@/components/LoadingState.vue';
+import EmptyState from '@/components/EmptyState.vue';
 
 export default {
   name: 'Results',
+  components: { PageHeader, LoadingState, EmptyState },
   data() {
     return {
+      loading: true,
       results: [],
       detail: null,
       tactics: {},
       roles: {},
     };
+  },
+  computed: {
+    resultSubtitle() {
+      if (!this.detail || !this.detail.race) return '';
+      const parts = [
+        this.detail.team && this.detail.team.name,
+        `${this.detail.race.distance} km`,
+        `+${this.detail.teamPointsEarned || 0} pts`,
+      ].filter(Boolean);
+      if (this.detail.tactic && this.detail.tactic !== 'balanced') {
+        parts.push(this.tacticLabel(this.detail.tactic));
+      }
+      return parts.join(' · ');
+    },
   },
   watch: {
     '$route.params.id': {
@@ -274,6 +301,8 @@ export default {
       return key;
     },
     async load() {
+      this.loading = true;
+      try {
       if (!Object.keys(this.tactics).length) {
         const [tactics, roles] = await Promise.all([
           axios.get('/api/tactics'),
@@ -292,54 +321,20 @@ export default {
         this.results = data;
         this.detail = null;
       }
+      } finally {
+        this.loading = false;
+      }
     },
   },
 };
 </script>
 
 <style scoped>
-.summary,
 .narrative,
 .segment-timeline {
   max-width: 48rem;
-  line-height: 1.5;
 }
 .narrative p {
   margin-bottom: 0.4rem;
-}
-.segment-track {
-  display: flex;
-  height: 0.65rem;
-  border-radius: 0.35rem;
-  overflow: hidden;
-  background: #e9ecef;
-}
-.segment-track-bar {
-  min-width: 2px;
-}
-.segment-track-bar.profile-flat { background: #adb5bd; }
-.segment-track-bar.profile-hilly { background: #ffc107; }
-.segment-track-bar.profile-mountain { background: #dc3545; }
-.segment-track-bar.profile-classic { background: #343a40; }
-.segment-track-bar.profile-tt { background: #17a2b8; }
-.segment-events {
-  padding-left: 1.1rem;
-  margin-bottom: 0;
-}
-.segment-events li {
-  margin-bottom: 0.15rem;
-}
-.random-event {
-  padding: 0.25rem 0.5rem;
-  border-radius: 4px;
-  margin-bottom: 0.25rem;
-}
-.event-positive {
-  background: #d4edda;
-  color: #155724;
-}
-.event-negative {
-  background: #f8d7da;
-  color: #721c24;
 }
 </style>

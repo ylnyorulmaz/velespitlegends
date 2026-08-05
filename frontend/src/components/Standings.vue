@@ -1,11 +1,18 @@
 <template>
-  <div class="container">
-    <h1>Season Standings</h1>
+  <div class="page-container">
+    <PageHeader
+      title="Season Standings"
+      subtitle="Team and rider points across the season."
+      eyebrow="Rankings"
+    />
 
-    <div class="row">
+    <LoadingState v-if="loading" label="Loading standings…" />
+
+    <div v-else class="row">
       <div class="col-md-6 mb-4">
         <h5>Teams</h5>
-        <table class="table table-sm table-striped">
+        <div class="vl-card">
+        <table class="table table-sm table-striped mb-0">
           <thead>
             <tr>
               <th>#</th>
@@ -17,7 +24,7 @@
           </thead>
           <tbody>
             <tr v-for="team in standings.teams" :key="team._id">
-              <td>{{ team.rank }}</td>
+              <td><span class="rank-badge" :class="'rank-' + team.rank">{{ team.rank }}</span></td>
               <td>{{ team.name }}</td>
               <td>{{ team.seasonPoints }}</td>
               <td>{{ team.wins }}</td>
@@ -25,12 +32,14 @@
             </tr>
           </tbody>
         </table>
-        <p v-if="!standings.teams.length" class="text-muted">No teams yet.</p>
+        </div>
+        <EmptyState v-if="!standings.teams.length" icon="🏆" title="No teams yet" />
       </div>
 
       <div class="col-md-6 mb-4">
-        <h5>Riders</h5>
-        <table class="table table-sm table-striped">
+        <h5 class="mb-3">Riders</h5>
+        <div class="vl-card">
+        <table class="table table-sm table-striped mb-0">
           <thead>
             <tr>
               <th>#</th>
@@ -42,7 +51,7 @@
           </thead>
           <tbody>
             <tr v-for="rider in standings.riders" :key="rider.cyclist">
-              <td>{{ rider.rank }}</td>
+              <td><span class="rank-badge" :class="'rank-' + rider.rank">{{ rider.rank }}</span></td>
               <td>{{ rider.name }}</td>
               <td>{{ rider.points }}</td>
               <td>{{ rider.races }}</td>
@@ -50,7 +59,8 @@
             </tr>
           </tbody>
         </table>
-        <p v-if="!standings.riders.length" class="text-muted">No rider results yet.</p>
+        </div>
+        <EmptyState v-if="!standings.riders.length" icon="🚴" title="No rider results yet" />
       </div>
     </div>
   </div>
@@ -58,11 +68,16 @@
 
 <script>
 import axios from 'axios';
+import PageHeader from '@/components/PageHeader.vue';
+import LoadingState from '@/components/LoadingState.vue';
+import EmptyState from '@/components/EmptyState.vue';
 
 export default {
   name: 'Standings',
+  components: { PageHeader, LoadingState, EmptyState },
   data() {
     return {
+      loading: true,
       standings: { teams: [], riders: [] },
     };
   },
@@ -71,8 +86,13 @@ export default {
   },
   methods: {
     async load() {
-      const { data } = await axios.get('/api/standings');
-      this.standings = data;
+      this.loading = true;
+      try {
+        const { data } = await axios.get('/api/standings');
+        this.standings = data;
+      } finally {
+        this.loading = false;
+      }
     },
   },
 };

@@ -1,7 +1,10 @@
 <template>
-  <div class="container">
-    <h1>Transfer Market</h1>
-    <p class="text-muted">Sign free agents or release riders from your team.</p>
+  <div class="page-container">
+    <PageHeader
+      title="Transfer Market"
+      subtitle="Sign free agents or release riders from your squad."
+      eyebrow="Contracts"
+    />
 
     <div v-if="error" class="alert alert-danger">{{ error }}</div>
     <div v-if="success" class="alert alert-success">{{ success }}</div>
@@ -78,9 +81,11 @@
 
 <script>
 import axios from 'axios';
+import PageHeader from '@/components/PageHeader.vue';
 
 export default {
   name: 'TransferMarket',
+  components: { PageHeader },
   data() {
     return {
       teams: [],

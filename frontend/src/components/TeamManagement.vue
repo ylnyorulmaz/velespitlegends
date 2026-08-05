@@ -1,6 +1,10 @@
 <template>
-  <div class="container">
-    <h1>Team Management</h1>
+  <div class="page-container">
+    <PageHeader
+      title="Teams"
+      subtitle="Create teams and manage roster and staff assignments."
+      eyebrow="Management"
+    />
 
     <form @submit.prevent="addTeam" class="mb-4">
       <div class="form-row">
@@ -92,6 +96,7 @@
 
 <script>
 import axios from 'axios';
+import PageHeader from '@/components/PageHeader.vue';
 
 const emptyTeam = () => ({
   name: '',
@@ -103,6 +108,7 @@ const emptyTeam = () => ({
 
 export default {
   name: 'TeamManagement',
+  components: { PageHeader },
   data() {
     return {
       teams: [],
