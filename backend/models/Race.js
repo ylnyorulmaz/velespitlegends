@@ -1,0 +1,62 @@
+const mongoose = require('mongoose');
+
+const RaceSchema = new mongoose.Schema({
+  name: String,
+  startDate: Date,
+  endDate: Date,
+  classification: String,
+  format: String,
+  totalDistance: Number,
+  duration: Number,
+  location: String,
+  terrainTypes: [String],
+  weatherConditions: {
+    temperature: Number,
+    wind: Number,
+    rainProbability: Number,
+  },
+  altitudeProfile: {
+    lowestPoint: Number,
+    highestPoint: Number,
+    totalElevationGain: Number,
+  },
+  timeBonuses: Number,
+  pointsClassification: String,
+  teamTimeTrialStages: Boolean,
+  individualTimeTrialStages: Boolean,
+  keyClimbs: [String],
+  sprintPoints: [String],
+  feedZones: [String],
+  technicalSections: [String],
+  historicalData: {
+    pastWinners: [String],
+    records: [String],
+    notableEvents: [String],
+  },
+  spectatorInterest: Number,
+  mediaCoverage: {
+    tvRights: String,
+    streamingOptions: String,
+  },
+  sponsorshipDetails: {
+    mainSponsors: [String],
+    secondarySponsors: [String],
+  },
+  prizeMoney: Number,
+  uciPoints: Number,
+  timeLimit: Number,
+  teamSize: Number,
+  wildcardEntries: Number,
+  racePrestige: Number,
+  localRegulations: String,
+  equipmentRestrictions: String,
+  antiDopingMeasures: String,
+  environmentalImpact: String,
+  culturalSignificance: String,
+  startAndFinishLocations: [String],
+  restDays: [Date],
+  teamSupport: String,
+  timeBonuses: Number,
+});
+
+module.exports = mongoose.model('Race', RaceSchema);
