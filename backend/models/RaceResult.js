@@ -74,6 +74,14 @@ const RaceResultSchema = new mongoose.Schema({
     type: String,
     default: 'balanced',
   },
+  riderRoles: [{
+    cyclist: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Cyclist',
+    },
+    name: String,
+    role: String,
+  }],
   standings: [StandingSchema],
   formChanges: [FormChangeSchema],
   teamPointsEarned: { type: Number, default: 0 },

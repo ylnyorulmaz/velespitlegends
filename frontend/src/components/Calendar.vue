@@ -1,7 +1,25 @@
 <template>
   <div class="container">
     <h1>Race Calendar</h1>
-    <p class="text-muted">Pick a race, your team, and 3–8 roster riders, then race.</p>
+    <p class="text-muted">Pick a race, your team, rider roles, and 3–8 roster riders, then race.</p>
+
+    <div v-if="season" class="season-bar card mb-3">
+      <div class="card-body py-2 d-flex flex-wrap justify-content-between align-items-center">
+        <div>
+          <strong>Season {{ season.year }}</strong>
+          — Week {{ season.currentWeek }} / {{ season.totalWeeks }}
+          <span v-if="season.status === 'completed'" class="badge badge-secondary ml-2">completed</span>
+        </div>
+        <button
+          type="button"
+          class="btn btn-sm btn-outline-primary"
+          :disabled="advancingSeason || season.status === 'completed'"
+          @click="advanceSeason"
+        >
+          {{ advancingSeason ? 'Advancing…' : 'Advance week' }}
+        </button>
+      </div>
+    </div>
 
     <div v-if="error" class="alert alert-danger">{{ error }}</div>
     <div v-if="success" class="alert alert-success">{{ success }}</div>
@@ -24,13 +42,14 @@
         <select id="race" v-model="selectedRaceId" class="form-control">
           <option disabled value="">Select race</option>
           <option
-            v-for="r in races"
+            v-for="r in availableRaces"
             :key="r._id"
             :value="r._id"
             :disabled="isRaceCompletedForTeam(r._id)"
           >
-            {{ formatDate(r.date) }} — {{ r.name }} ({{ r.profile }}, {{ r.distance }} km)
+            W{{ r.seasonWeek || 1 }} · {{ formatDate(r.date) }} — {{ r.name }} ({{ r.profile }}, {{ r.distance }} km)
             {{ isRaceCompletedForTeam(r._id) ? ' ✓ done' : '' }}
+            {{ isRaceLocked(r) ? ' 🔒' : '' }}
           </option>
         </select>
       </div>
@@ -47,6 +66,10 @@
       </div>
     </div>
 
+    <div v-if="isSelectedRaceLocked" class="alert alert-warning">
+      This race opens in week {{ selectedRace.seasonWeek }}. Advance the season to race it.
+    </div>
+
     <h5>Select riders ({{ selectedRiderIds.length }}/8)</h5>
     <div v-if="!availableCyclists.length" class="alert alert-warning">
       <span v-if="selectedTeam && selectedTeam.roster && selectedTeam.roster.length">
@@ -60,22 +83,61 @@
       </span>
     </div>
     <div class="rider-grid mb-3">
-      <label
+      <div
         v-for="c in availableCyclists"
         :key="c._id"
         class="rider-card"
         :class="{ selected: isSelected(c._id) }"
       >
-        <input
-          type="checkbox"
-          :value="c._id"
-          :checked="isSelected(c._id)"
-          @change="toggleRider(c._id)"
-        >
-        <strong>{{ c.name }}</strong>
+        <label class="rider-select">
+          <input
+            type="checkbox"
+            :value="c._id"
+            :checked="isSelected(c._id)"
+            @change="toggleRider(c._id)"
+          >
+          <strong>{{ c.name }}</strong>
+        </label>
         <span>S{{ c.sprint }} C{{ c.climb }} TT{{ c.timeTrial }} E{{ c.endurance }}</span>
         <span>form {{ c.form }} · fatigue {{ c.fatigue }} · {{ c.specialty }}</span>
-      </label>
+        <select
+          v-if="isSelected(c._id)"
+          v-model="riderRoles[c._id]"
+          class="form-control form-control-sm mt-1"
+          @click.stop
+        >
+          <option v-for="(info, key) in roles" :key="key" :value="key">
+            {{ info.label }}
+          </option>
+        </select>
+      </div>
+    </div>
+
+    <div v-if="selectedTeam && selectedTeam.roster && selectedTeam.roster.length" class="rest-panel card mb-3">
+      <div class="card-body py-2">
+        <div class="d-flex flex-wrap justify-content-between align-items-center mb-2">
+          <strong>Rest day</strong>
+          <button
+            type="button"
+            class="btn btn-sm btn-outline-secondary"
+            :disabled="resting || !restRiderIds.length"
+            @click="restRiders"
+          >
+            {{ resting ? 'Resting…' : `Rest selected (${restRiderIds.length})` }}
+          </button>
+        </div>
+        <div class="rest-grid">
+          <label v-for="c in teamRosterCyclists" :key="'rest-' + c._id" class="rest-rider">
+            <input
+              type="checkbox"
+              :value="c._id"
+              :checked="restRiderIds.includes(c._id)"
+              @change="toggleRestRider(c._id)"
+            >
+            {{ c.name }} (fat {{ c.fatigue }})
+          </label>
+        </div>
+      </div>
     </div>
 
     <button
@@ -97,7 +159,8 @@
       >
         <strong>{{ r.name }}</strong>
         — {{ formatDate(r.date) }}
-        — {{ r.distance }} km · {{ r.profile }} · prestige {{ r.prestige }}
+        — {{ r.distance }} km · {{ r.profile }} · prestige {{ r.prestige }} · week {{ r.seasonWeek || 1 }}
+        <span v-if="isRaceLocked(r)" class="badge badge-warning ml-2">locked</span>
         <span v-if="isRaceCompletedForTeam(r._id)" class="badge badge-success ml-2">completed</span>
       </li>
     </ul>
@@ -119,6 +182,12 @@ export default {
       selectedRiderIds: [],
       selectedTactic: 'balanced',
       tactics: {},
+      roles: {},
+      riderRoles: {},
+      season: null,
+      advancingSeason: false,
+      restRiderIds: [],
+      resting: false,
       submitting: false,
       error: '',
       success: '',
@@ -127,6 +196,17 @@ export default {
   computed: {
     selectedTeam() {
       return this.teams.find((t) => t._id === this.selectedTeamId) || null;
+    },
+    selectedRace() {
+      return this.races.find((r) => r._id === this.selectedRaceId) || null;
+    },
+    availableRaces() {
+      return this.races;
+    },
+    teamRosterCyclists() {
+      if (!this.selectedTeam || !this.selectedTeam.roster) return [];
+      const rosterIds = new Set(this.selectedTeam.roster.map((r) => String(r._id || r)));
+      return this.cyclists.filter((c) => rosterIds.has(String(c._id)));
     },
     availableCyclists() {
       if (!this.selectedTeam || !this.selectedTeam.roster || !this.selectedTeam.roster.length) {
@@ -138,6 +218,9 @@ export default {
     isCurrentEntryCompleted() {
       return this.isRaceCompletedForTeam(this.selectedRaceId);
     },
+    isSelectedRaceLocked() {
+      return this.selectedRace && this.isRaceLocked(this.selectedRace);
+    },
     canEnter() {
       return (
         this.selectedRaceId
@@ -145,6 +228,7 @@ export default {
         && this.selectedRiderIds.length >= 3
         && this.selectedRiderIds.length <= 8
         && !this.isCurrentEntryCompleted
+        && !this.isSelectedRaceLocked
       );
     },
   },
@@ -164,8 +248,14 @@ export default {
         (entry) => String(entry.team) === String(this.selectedTeamId),
       );
     },
+    isRaceLocked(race) {
+      if (!race || !this.season) return false;
+      return (race.seasonWeek || 1) > this.season.currentWeek;
+    },
     onTeamChange() {
       this.selectedRiderIds = [];
+      this.riderRoles = {};
+      this.restRiderIds = [];
       this.error = '';
     },
     isSelected(id) {
@@ -174,6 +264,9 @@ export default {
     toggleRider(id) {
       if (this.isSelected(id)) {
         this.selectedRiderIds = this.selectedRiderIds.filter((x) => x !== id);
+        const nextRoles = { ...this.riderRoles };
+        delete nextRoles[id];
+        this.riderRoles = nextRoles;
         return;
       }
       if (this.selectedRiderIds.length >= 8) {
@@ -182,18 +275,71 @@ export default {
       }
       this.error = '';
       this.selectedRiderIds = [...this.selectedRiderIds, id];
+      if (!this.riderRoles[id]) {
+        this.$set(this.riderRoles, id, 'domestique');
+      }
+    },
+    toggleRestRider(id) {
+      if (this.restRiderIds.includes(id)) {
+        this.restRiderIds = this.restRiderIds.filter((x) => x !== id);
+      } else {
+        this.restRiderIds = [...this.restRiderIds, id];
+      }
+    },
+    async restRiders() {
+      if (!this.restRiderIds.length) return;
+      this.resting = true;
+      this.error = '';
+      try {
+        await axios.post('/api/cyclists/rest', { cyclistIds: this.restRiderIds });
+        this.success = 'Riders rested — fatigue reduced.';
+        this.restRiderIds = [];
+        const { data } = await axios.get('/api/cyclists');
+        this.cyclists = data;
+        await this.reloadTeams();
+      } catch (err) {
+        this.error = (err.response && err.response.data && err.response.data.error)
+          || err.message
+          || 'Rest failed';
+      } finally {
+        this.resting = false;
+      }
+    },
+    async reloadTeams() {
+      const { data } = await axios.get('/api/teams');
+      this.teams = data;
+    },
+    async advanceSeason() {
+      this.advancingSeason = true;
+      this.error = '';
+      this.success = '';
+      try {
+        const { data } = await axios.post('/api/season/advance');
+        this.season = data.season;
+        this.success = data.message;
+      } catch (err) {
+        this.error = (err.response && err.response.data && err.response.data.error)
+          || err.message
+          || 'Failed to advance season';
+      } finally {
+        this.advancingSeason = false;
+      }
     },
     async load() {
-      const [races, teams, cyclists, tactics] = await Promise.all([
+      const [races, teams, cyclists, tactics, roles, season] = await Promise.all([
         axios.get('/api/races'),
         axios.get('/api/teams'),
         axios.get('/api/cyclists'),
         axios.get('/api/tactics'),
+        axios.get('/api/roles'),
+        axios.get('/api/season'),
       ]);
       this.races = races.data;
       this.teams = teams.data;
       this.cyclists = cyclists.data;
       this.tactics = tactics.data;
+      this.roles = roles.data;
+      this.season = season.data;
       if (this.teams.length && !this.selectedTeamId) {
         this.selectedTeamId = this.teams[0]._id;
       }
@@ -213,8 +359,10 @@ export default {
           teamId: this.selectedTeamId,
           cyclistIds: this.selectedRiderIds,
           tactic: this.selectedTactic,
+          roles: this.riderRoles,
         });
         this.success = 'Race finished — opening result…';
+        await this.load();
         this.$router.push(`/results/${data._id}`);
       } catch (err) {
         this.error = (err.response && err.response.data && err.response.data.error)
@@ -248,7 +396,24 @@ export default {
   border-color: #007bff;
   background: #eef5ff;
 }
-.rider-card input {
-  margin-bottom: 0.35rem;
+.rider-select {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  margin-bottom: 0.25rem;
+  cursor: pointer;
+}
+.rest-grid {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 1rem;
+  font-size: 0.85rem;
+}
+.rest-rider {
+  margin: 0;
+  cursor: pointer;
+}
+.season-bar {
+  max-width: 48rem;
 }
 </style>

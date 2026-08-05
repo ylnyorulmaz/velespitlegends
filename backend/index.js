@@ -29,9 +29,12 @@ const {
   simulateRace,
   staffTacticBonus,
   TACTICS,
+  RIDER_ROLES,
   normalizeTactic,
+  normalizeRoles,
   validateRaceSegments,
 } = require('./services/raceEngine');
+const { getOrCreateSeason, advanceSeasonWeek } = require('./services/seasonService');
 
 const app = express();
 app.use(bodyParser.json());
@@ -80,6 +83,69 @@ app.post('/api/cyclists/rest', async (req, res) => {
   res.send(cyclists);
 });
 
+// Season routes
+app.get('/api/season', async (req, res) => {
+  const season = await getOrCreateSeason();
+  res.send(season);
+});
+
+app.post('/api/season/advance', async (req, res) => {
+  try {
+    const result = await advanceSeasonWeek();
+    res.send(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/roles', (req, res) => {
+  res.send(RIDER_ROLES);
+});
+
+app.get('/api/standings', async (req, res) => {
+  const teams = await Team.find().sort({ seasonPoints: -1, wins: -1 });
+  const results = await RaceResult.find();
+
+  const riderMap = new Map();
+  for (const result of results) {
+    for (const row of result.standings || []) {
+      if (!row.isPlayer || !row.cyclist) continue;
+      const id = String(row.cyclist);
+      const prev = riderMap.get(id) || {
+        cyclist: row.cyclist,
+        name: row.name,
+        points: 0,
+        races: 0,
+        wins: 0,
+      };
+      prev.points += row.points || 0;
+      prev.races += 1;
+      if (row.position === 1) prev.wins += 1;
+      riderMap.set(id, prev);
+    }
+  }
+
+  const riders = Array.from(riderMap.values()).sort((a, b) => {
+    if (b.points !== a.points) return b.points - a.points;
+    return b.wins - a.wins;
+  });
+
+  res.send({
+    teams: teams.map((team, index) => ({
+      rank: index + 1,
+      _id: team._id,
+      name: team.name,
+      seasonPoints: team.seasonPoints || 0,
+      wins: team.wins || 0,
+      rosterSize: (team.roster || []).length,
+    })),
+    riders: riders.map((rider, index) => ({
+      rank: index + 1,
+      ...rider,
+    })),
+  });
+});
+
 // Race routes
 app.get('/api/tactics', (req, res) => {
   res.send(TACTICS);
@@ -125,7 +191,7 @@ app.put('/api/races/:id', async (req, res) => {
 
 app.post('/api/races/:id/enter', async (req, res) => {
   try {
-    const { teamId, cyclistIds, tactic: rawTactic } = req.body;
+    const { teamId, cyclistIds, tactic: rawTactic, roles: rawRoles } = req.body;
 
     if (!teamId || !Array.isArray(cyclistIds)) {
       return res.status(400).json({ error: 'teamId and cyclistIds[] are required' });
@@ -147,6 +213,14 @@ app.post('/api/races/:id/enter', async (req, res) => {
       return res.status(400).json({ error: 'This team already completed this race' });
     }
 
+    const season = await getOrCreateSeason();
+    const raceWeek = race.seasonWeek || 1;
+    if (raceWeek > season.currentWeek) {
+      return res.status(400).json({
+        error: `This race opens in week ${raceWeek}. Current season week is ${season.currentWeek}.`,
+      });
+    }
+
     const riders = await Cyclist.find({ _id: { $in: cyclistIds } });
     if (riders.length !== cyclistIds.length) {
       return res.status(400).json({ error: 'One or more cyclists not found' });
@@ -162,7 +236,9 @@ app.post('/api/races/:id/enter', async (req, res) => {
 
     const staffBonus = staffTacticBonus(team.staff || []);
     const tactic = normalizeTactic(rawTactic);
-    const seed = `${race._id}-${teamId}-${race.date || ''}-${tactic}`;
+    const roles = normalizeRoles(cyclistIds, rawRoles || {});
+    const roleKey = Object.values(roles).sort().join('-');
+    const seed = `${race._id}-${teamId}-${race.date || ''}-${tactic}-${roleKey}`;
 
     const rosterSet = new Set(team.roster.map((id) => String(id)));
     cyclistIds.forEach((id) => rosterSet.add(String(id)));
@@ -175,7 +251,8 @@ app.post('/api/races/:id/enter', async (req, res) => {
       formChanges,
       teamPointsEarned,
       segmentLog,
-    } = simulateRace(race, riders, team.name, { teamId, seed, staffBonus, tactic });
+      riderRoles,
+    } = simulateRace(race, riders, team.name, { teamId, seed, staffBonus, tactic, roles });
 
     // Persist fatigue/form ticks
     await Promise.all(riders.map((rider) => rider.save()));
@@ -196,6 +273,7 @@ app.post('/api/races/:id/enter', async (req, res) => {
       narrative,
       segmentLog,
       tactic,
+      riderRoles,
       standings,
       formChanges,
       teamPointsEarned,
@@ -251,6 +329,24 @@ app.post('/api/teams', async (req, res) => {
   res.send(team);
 });
 
+app.put('/api/teams/:id', async (req, res) => {
+  try {
+    const team = await Team.findById(req.params.id);
+    if (!team) return res.status(404).json({ error: 'Team not found' });
+
+    const allowed = ['name', 'nationality', 'budget', 'roster', 'staff'];
+    allowed.forEach((field) => {
+      if (req.body[field] !== undefined) team[field] = req.body[field];
+    });
+
+    await team.save();
+    const populated = await Team.findById(team._id).populate('roster').populate('staff');
+    res.send(populated);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Staff routes
 app.get('/api/staff', async (req, res) => {
   const staff = await Staff.find();
@@ -265,8 +361,14 @@ app.post('/api/staff', async (req, res) => {
 
 // Dashboard summary for home
 app.get('/api/dashboard', async (req, res) => {
+  const season = await getOrCreateSeason();
   const teams = await Team.find().sort({ seasonPoints: -1 }).limit(5).populate('roster');
-  const nextRace = await Race.findOne().sort({ date: 1 });
+  const nextRace = await Race.findOne({
+    seasonWeek: { $lte: season.currentWeek },
+  }).sort({ seasonWeek: 1, date: 1 });
+  const upcomingRace = await Race.findOne({
+    seasonWeek: { $gt: season.currentWeek },
+  }).sort({ seasonWeek: 1, date: 1 });
   const recent = await RaceResult.find()
     .sort({ createdAt: -1 })
     .limit(3)
@@ -283,6 +385,7 @@ app.get('/api/dashboard', async (req, res) => {
     : [];
 
   res.send({
+    season,
     topTeams: teams.map((t) => ({
       _id: t._id,
       name: t.name,
@@ -291,6 +394,7 @@ app.get('/api/dashboard', async (req, res) => {
       seasonPoints: t.seasonPoints || 0,
     })),
     nextRace,
+    upcomingRace,
     recentResults: recent,
     formSnapshot,
   });

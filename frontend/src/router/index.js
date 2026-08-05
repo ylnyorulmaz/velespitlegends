@@ -7,6 +7,7 @@ import RaceManagement from '@/components/RaceManagement.vue';
 import StaffManagement from '@/components/StaffManagement.vue';
 import Calendar from '@/components/Calendar.vue';
 import Results from '@/components/Results.vue';
+import Standings from '@/components/Standings.vue';
 
 Vue.use(Router);
 
@@ -19,6 +20,7 @@ export default new Router({
     { path: '/races', component: RaceManagement },
     { path: '/staff', component: StaffManagement },
     { path: '/calendar', component: Calendar },
+    { path: '/standings', component: Standings },
     { path: '/results', component: Results },
     { path: '/results/:id', component: Results },
   ],

@@ -18,6 +18,19 @@
         </span>
       </p>
 
+      <div v-if="detail.riderRoles && detail.riderRoles.length" class="mb-3">
+        <h5>Team roles</h5>
+        <div class="role-tags">
+          <span
+            v-for="entry in detail.riderRoles"
+            :key="entry.cyclist"
+            class="badge badge-light mr-2 mb-1"
+          >
+            {{ entry.name }} — {{ roleLabel(entry.role) }}
+          </span>
+        </div>
+      </div>
+
       <div
         v-if="detail.segmentLog && detail.segmentLog.length"
         class="segment-timeline mb-4"
@@ -188,6 +201,7 @@ export default {
       results: [],
       detail: null,
       tactics: {},
+      roles: {},
     };
   },
   watch: {
@@ -242,10 +256,18 @@ export default {
       if (this.tactics[key]) return this.tactics[key].label;
       return key;
     },
+    roleLabel(key) {
+      if (this.roles[key]) return this.roles[key].label;
+      return key;
+    },
     async load() {
       if (!Object.keys(this.tactics).length) {
-        const { data } = await axios.get('/api/tactics');
-        this.tactics = data;
+        const [tactics, roles] = await Promise.all([
+          axios.get('/api/tactics'),
+          axios.get('/api/roles'),
+        ]);
+        this.tactics = tactics.data;
+        this.roles = roles.data;
       }
       const id = this.$route.params.id;
       if (id) {

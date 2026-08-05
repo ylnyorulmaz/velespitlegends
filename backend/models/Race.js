@@ -10,6 +10,7 @@ const RaceSchema = new mongoose.Schema({
     default: 'flat',
   },
   prestige: { type: Number, default: 50, min: 1, max: 100 },
+  seasonWeek: { type: Number, min: 1, default: 1 },
   segments: [{
     km: Number,
     profile: {

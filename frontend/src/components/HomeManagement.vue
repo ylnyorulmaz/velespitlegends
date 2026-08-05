@@ -2,8 +2,12 @@
   <div class="container home">
     <h1>Velespit Legends</h1>
     <p class="lead">Text-based cycling team management. Decisions matter.</p>
+    <p v-if="dashboard.season" class="text-muted">
+      Season {{ dashboard.season.year }} — week {{ dashboard.season.currentWeek }} / {{ dashboard.season.totalWeeks }}
+    </p>
     <p>
       <router-link to="/calendar" class="btn btn-primary mr-2">Race Calendar</router-link>
+      <router-link to="/standings" class="btn btn-outline-primary mr-2">Standings</router-link>
       <router-link to="/results" class="btn btn-outline-secondary">Results</router-link>
     </p>
 
@@ -27,10 +31,15 @@
         <h5>Next race</h5>
         <div v-if="dashboard.nextRace" class="border rounded p-3">
           <strong>{{ dashboard.nextRace.name }}</strong>
-          <div>{{ formatDate(dashboard.nextRace.date) }}</div>
+          <div>Week {{ dashboard.nextRace.seasonWeek || 1 }} · {{ formatDate(dashboard.nextRace.date) }}</div>
           <div class="text-muted">
             {{ dashboard.nextRace.profile }} · {{ dashboard.nextRace.distance }} km
           </div>
+        </div>
+        <div v-else-if="dashboard.upcomingRace" class="border rounded p-3 text-muted">
+          Next up (week {{ dashboard.upcomingRace.seasonWeek }}):
+          <strong>{{ dashboard.upcomingRace.name }}</strong>
+          — advance the season to unlock
         </div>
         <p v-else class="text-muted">Add a race to the calendar.</p>
       </div>
@@ -61,8 +70,10 @@ export default {
   data() {
     return {
       dashboard: {
+        season: null,
         topTeams: [],
         nextRace: null,
+        upcomingRace: null,
         formSnapshot: [],
         recentResults: [],
       },

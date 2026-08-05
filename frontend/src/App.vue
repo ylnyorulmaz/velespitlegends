@@ -17,6 +17,9 @@
             <router-link to="/races" class="nav-link">Races</router-link>
           </li>
           <li class="nav-item">
+            <router-link to="/standings" class="nav-link">Standings</router-link>
+          </li>
+          <li class="nav-item">
             <router-link to="/calendar" class="nav-link">Calendar</router-link>
           </li>
           <li class="nav-item">

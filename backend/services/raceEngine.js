@@ -29,6 +29,31 @@ const TACTICS = {
 
 const VALID_TACTICS = Object.keys(TACTICS);
 
+const RIDER_ROLES = {
+  leader: {
+    label: 'Leader',
+    description: 'Protected finisher — bonus on the final segment and domestique support.',
+  },
+  sprinter: {
+    label: 'Sprinter',
+    description: 'Bonus on flat finishes; ideal for bunch sprints.',
+  },
+  climber: {
+    label: 'Climber',
+    description: 'Bonus on hilly and mountain segments.',
+  },
+  domestique: {
+    label: 'Domestique',
+    description: 'Works for the leader — boosts leader score, extra fatigue.',
+  },
+  protected: {
+    label: 'Protected',
+    description: 'Less likely to be dropped on climbs.',
+  },
+};
+
+const VALID_ROLES = Object.keys(RIDER_ROLES);
+
 const RANDOM_EVENTS = {
   flat_tire: {
     kind: 'negative',
@@ -216,6 +241,73 @@ function normalizeTactic(tactic) {
   return VALID_TACTICS.includes(key) ? key : 'balanced';
 }
 
+function normalizeRoles(cyclistIds, rolesInput = {}) {
+  const map = {};
+  let leaderAssigned = false;
+
+  cyclistIds.forEach((id) => {
+    let role = String(rolesInput[id] || rolesInput[String(id)] || 'domestique').toLowerCase();
+    if (!VALID_ROLES.includes(role)) role = 'domestique';
+    if (role === 'leader') {
+      if (leaderAssigned) role = 'domestique';
+      else leaderAssigned = true;
+    }
+    map[String(id)] = role;
+  });
+
+  return map;
+}
+
+function buildTeamComposition(activePlayers) {
+  const domestiquesActive = activePlayers.filter(
+    (c) => c.role === 'domestique' && !c.dropped,
+  ).length;
+  const hasLeader = activePlayers.some((c) => c.role === 'leader' && !c.dropped);
+  return { domestiquesActive, hasLeader };
+}
+
+function roleSegmentBonus(competitor, segmentProfile, context) {
+  if (!competitor.isPlayer) return 0;
+
+  const { segmentMeta = {}, teamComposition = {} } = context;
+  const role = competitor.role || 'domestique';
+  const isClimbSegment = segmentProfile === 'hilly' || segmentProfile === 'mountain';
+  const isFlatSegment = segmentProfile === 'flat';
+  let bonus = 0;
+
+  switch (role) {
+    case 'sprinter':
+      if (segmentMeta.isLastSegment && isFlatSegment) {
+        bonus += 8 + num(competitor.sprint) * 0.04;
+        if (competitor.specialty === 'leadout') bonus += 4;
+      }
+      break;
+    case 'climber':
+      if (isClimbSegment) bonus += 6 + num(competitor.climb) * 0.03;
+      break;
+    case 'leader':
+      if (segmentMeta.isLastSegment) bonus += 5;
+      if (teamComposition.hasLeader && teamComposition.domestiquesActive) {
+        bonus += Math.min(teamComposition.domestiquesActive * 3, 9);
+      }
+      break;
+    case 'protected':
+      if (isClimbSegment) bonus += 2;
+      break;
+    default:
+      break;
+  }
+
+  return bonus;
+}
+
+function roleDropThreshold(competitor, baseThreshold) {
+  if (competitor.isPlayer && competitor.role === 'protected') {
+    return baseThreshold - 0.06;
+  }
+  return baseThreshold;
+}
+
 function tacticSegmentBonus(competitor, segmentProfile, tactic, segmentMeta = {}) {
   if (!competitor.isPlayer) return 0;
 
@@ -320,9 +412,10 @@ function segmentScore(competitor, segmentProfile, context) {
   const staffBoost = competitor.isPlayer ? staffBonus * 0.015 : 0;
   const dropPenalty = competitor.dropped ? -20 : 0;
   const tacticBoost = tacticSegmentBonus(competitor, segmentProfile, tactic, segmentMeta);
+  const roleBoost = roleSegmentBonus(competitor, segmentProfile, context);
   const eventBoost = competitor.segmentMod ? num(competitor.segmentMod.scoreDelta, 0) : 0;
 
-  return skill * 0.78 + form * 0.12 - fatigue * 0.22 + varianceRoll + staffBoost + dropPenalty + tacticBoost + eventBoost;
+  return skill * 0.78 + form * 0.12 - fatigue * 0.22 + varianceRoll + staffBoost + dropPenalty + tacticBoost + roleBoost + eventBoost;
 }
 
 function toCompetitor(rider, meta = {}) {
@@ -338,6 +431,7 @@ function toCompetitor(rider, meta = {}) {
     form: num(rider.form, 70),
     fatigue: num(rider.fatigue, 20),
     teamwork: num(rider.teamwork),
+    role: meta.role || 'domestique',
     cumulativeScore: 0,
     dropped: false,
   };
@@ -376,6 +470,8 @@ function resolveSegment(competitors, segment, kmEnd, totalDistance, context) {
   });
 
   const randomRoll = rollRandomEvents(active, segment, context);
+  const playerActive = active.filter((c) => c.isPlayer);
+  context.teamComposition = buildTeamComposition(playerActive);
 
   const scored = active.map((competitor) => ({
     competitor,
@@ -392,7 +488,14 @@ function resolveSegment(competitors, segment, kmEnd, totalDistance, context) {
 
     const fatigueTick = segment.km / 22 + (hardSegment ? 2 : 0);
     const eventFatigue = competitor.segmentMod ? num(competitor.segmentMod.fatigueDelta, 0) : 0;
-    competitor.fatigue = clamp(Math.round(competitor.fatigue + fatigueTick + eventFatigue), 0, 100);
+    const domestiqueFatigue = competitor.isPlayer && competitor.role === 'domestique' ? 3 : 0;
+    competitor.fatigue = clamp(
+      Math.round(competitor.fatigue + fatigueTick + eventFatigue + domestiqueFatigue),
+      0,
+      100,
+    );
+
+    const personalDropCutoff = roleDropThreshold(competitor, dropCutoff);
 
     if (competitor.segmentMod && competitor.segmentMod.forceDrop && !competitor.dropped) {
       competitor.dropped = true;
@@ -400,7 +503,7 @@ function resolveSegment(competitors, segment, kmEnd, totalDistance, context) {
     } else if (
       hardSegment
       && index >= Math.floor(scored.length * 0.55)
-      && score < average * dropCutoff
+      && score < average * personalDropCutoff
       && !competitor.dropped
     ) {
       competitor.dropped = true;
@@ -448,15 +551,20 @@ function resolveSegment(competitors, segment, kmEnd, totalDistance, context) {
   };
 }
 
-function buildNarrativeFromSegments(race, segmentLog, standings, teamName, staffBonus, tactic) {
+function buildNarrativeFromSegments(race, segmentLog, standings, teamName, staffBonus, tactic, riderRoles) {
   const winner = standings[0];
   const bestPlayer = standings.find((row) => row.isPlayer);
   const tacticInfo = TACTICS[tactic];
+  const leaderRole = (riderRoles || []).find((entry) => entry.role === 'leader');
 
   const lines = [`${race.name} unfolds over ${num(race.distance, 180)} km.`];
 
   if (tacticInfo && tactic !== 'balanced') {
     lines.push(`${teamName} races with a ${tacticInfo.label.toLowerCase()} plan.`);
+  }
+
+  if (leaderRole) {
+    lines.push(`${leaderRole.name} is the designated leader for ${teamName}.`);
   }
 
   segmentLog.forEach((segment) => {
@@ -531,7 +639,12 @@ function applyConditionTick(riders, standings, race, competitors) {
 function simulateRace(race, riders, teamName, options = {}) {
   const teamId = options.teamId || 'team';
   const tactic = normalizeTactic(options.tactic);
-  const seed = options.seed || `${race._id}-${teamId}-${race.date || ''}-${tactic}`;
+  const rolesMap = normalizeRoles(
+    riders.map((rider) => rider._id),
+    options.roles || {},
+  );
+  const roleKey = Object.values(rolesMap).sort().join('-');
+  const seed = options.seed || `${race._id}-${teamId}-${race.date || ''}-${tactic}-${roleKey}`;
   const rng = createRng(seed);
   const staffBonus = options.staffBonus || 0;
 
@@ -539,9 +652,19 @@ function simulateRace(race, riders, teamName, options = {}) {
   const totalDistance = segments.reduce((sum, segment) => sum + segment.km, 0);
 
   const competitors = [
-    ...riders.map((rider) => toCompetitor(rider, { isPlayer: true, cyclist: rider._id })),
+    ...riders.map((rider) => toCompetitor(rider, {
+      isPlayer: true,
+      cyclist: rider._id,
+      role: rolesMap[String(rider._id)] || 'domestique',
+    })),
     ...makeRivals(race.profile || 'flat', rng).map((rival) => toCompetitor(rival, { isPlayer: false })),
   ];
+
+  const riderRoles = riders.map((rider) => ({
+    cyclist: rider._id,
+    name: rider.name,
+    role: rolesMap[String(rider._id)] || 'domestique',
+  }));
 
   const segmentLog = [];
   let kmCursor = 0;
@@ -576,7 +699,9 @@ function simulateRace(race, riders, teamName, options = {}) {
     row.points = POINTS[index] || 0;
   });
 
-  const narrative = buildNarrativeFromSegments(race, segmentLog, standings, teamName, staffBonus, tactic);
+  const narrative = buildNarrativeFromSegments(
+    race, segmentLog, standings, teamName, staffBonus, tactic, riderRoles,
+  );
   const formChanges = applyConditionTick(riders, standings, race, competitors);
   const teamPointsEarned = standings
     .filter((row) => row.isPlayer)
@@ -598,6 +723,7 @@ function simulateRace(race, riders, teamName, options = {}) {
     segments,
     seed,
     tactic,
+    riderRoles,
     staffBonus: Math.round(staffBonus * 10) / 10,
   };
 }
@@ -627,6 +753,9 @@ module.exports = {
   raceDayScore,
   TACTICS,
   VALID_TACTICS,
+  RIDER_ROLES,
+  VALID_ROLES,
   normalizeTactic,
+  normalizeRoles,
   validateRaceSegments,
 };

@@ -29,9 +29,13 @@
                 <option value="tt">Time Trial</option>
               </select>
             </div>
-            <div class="form-group col-md-1">
+            <div class="form-group col-md-2">
               <label for="prestige">Prestige</label>
               <input id="prestige" v-model.number="race.prestige" type="number" class="form-control" min="1" max="100">
+            </div>
+            <div class="form-group col-md-1">
+              <label for="seasonWeek">Week</label>
+              <input id="seasonWeek" v-model.number="race.seasonWeek" type="number" class="form-control" min="1">
             </div>
           </div>
 
@@ -113,8 +117,9 @@
             <strong>{{ r.name }}</strong>
             — {{ formatDate(r.date) }}
             — {{ r.distance }} km
-            — {{ r.profile }}
-            — prestige {{ r.prestige }}
+        — {{ r.profile }}
+        — prestige {{ r.prestige }}
+        — week {{ r.seasonWeek || 1 }}
             <span v-if="r.segments && r.segments.length" class="badge badge-info ml-1">
               {{ r.segments.length }} custom segments
             </span>
@@ -142,6 +147,7 @@ const emptyRace = () => ({
   distance: 180,
   profile: 'flat',
   prestige: 50,
+  seasonWeek: 1,
   segments: [],
 });
 
@@ -198,6 +204,7 @@ export default {
         distance: race.distance,
         profile: race.profile,
         prestige: race.prestige,
+        seasonWeek: race.seasonWeek || 1,
         segments: (race.segments || []).map((segment) => ({
           km: segment.km,
           profile: segment.profile,
@@ -221,6 +228,7 @@ export default {
         distance: Number(this.race.distance),
         profile: this.race.profile,
         prestige: Number(this.race.prestige),
+        seasonWeek: Number(this.race.seasonWeek) || 1,
         segments: [],
       };
 
