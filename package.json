@@ -1,1 +1,13 @@
-{}
+{
+  "name": "velespitlegends",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "postinstall": "npm ci --prefix backend --omit=dev && npm ci --prefix frontend",
+    "build": "npm run build --prefix frontend",
+    "start": "node backend/index.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
