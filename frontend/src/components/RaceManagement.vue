@@ -59,11 +59,11 @@
     },
     methods: {
       async fetchRaces() {
-        const response = await axios.get('http://localhost:3000/api/races');
+        const response = await axios.get('/api/races');
         this.races = response.data;
       },
       async addRace() {
-        const response = await axios.post('http://localhost:3000/api/races', this.race);
+        const response = await axios.post('/api/races', this.race);
         this.races.push(response.data);
         this.race = {
           name: '',

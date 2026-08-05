@@ -1,6 +1,6 @@
 import Vue from 'vue';
 import Router from 'vue-router';
-import Home from '@/components/Home.vue';
+import Home from '@/components/HomeManagement.vue';
 import CyclistManagement from '@/components/CyclistManagement.vue';
 import TeamManagement from '@/components/TeamManagement.vue';
 import RaceManagement from '@/components/RaceManagement.vue';

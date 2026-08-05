@@ -56,11 +56,11 @@
     },
     methods: {
       async fetchTeams() {
-        const response = await axios.get('http://localhost:3000/api/teams');
+        const response = await axios.get('/api/teams');
         this.teams = response.data;
       },
       async addTeam() {
-        const response = await axios.post('http://localhost:3000/api/teams', this.team);
+        const response = await axios.post('/api/teams', this.team);
         this.teams.push(response.data);
         this.team = {
           name: '',

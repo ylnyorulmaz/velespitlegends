@@ -54,11 +54,11 @@
     },
     methods: {
       async fetchStaff() {
-        const response = await axios.get('http://localhost:3000/api/staff');
+        const response = await axios.get('/api/staff');
         this.staff = response.data;
       },
       async addStaff() {
-        const response = await axios.post('http://localhost:3000/api/staff', this.staffMember);
+        const response = await axios.post('/api/staff', this.staffMember);
         this.staff.push(response.data);
         this.staffMember = {
           name: '',
