@@ -34,7 +34,6 @@ const {
   normalizeTactic,
   normalizeRoles,
   validateRaceSegments,
-  createRng,
 } = require('./services/raceEngine');
 const {
   getOrCreateSeason,
@@ -43,12 +42,9 @@ const {
 } = require('./services/seasonService');
 const {
   isInjured,
-  extractInjuriesFromSegmentLog,
-  applyInjuries,
   computeMarketValue,
 } = require('./services/injuryService');
 const {
-  updateStageRaceGc,
   isStageUnlockedForTeam,
   createStageRaceWithStages,
   decorateGcStandings,
@@ -59,6 +55,13 @@ const {
   releaseCyclist,
 } = require('./services/transferService');
 const { buildRivalSquads } = require('./services/pelotonService');
+const { persistRaceOutcome } = require('./services/racePersistService');
+const {
+  startLiveRaceSession,
+  continueLiveRace,
+  finishLiveRace,
+  getSession,
+} = require('./services/liveRaceService');
 
 const app = express();
 app.use(bodyParser.json());
@@ -326,102 +329,121 @@ app.put('/api/races/:id', async (req, res) => {
   }
 });
 
+async function loadRaceEntryContext(raceId, body) {
+  const { teamId, cyclistIds } = body || {};
+  if (!teamId || !Array.isArray(cyclistIds)) {
+    const err = new Error('teamId and cyclistIds[] are required');
+    err.status = 400;
+    throw err;
+  }
+  if (cyclistIds.length < 3 || cyclistIds.length > 8) {
+    const err = new Error('Select between 3 and 8 riders');
+    err.status = 400;
+    throw err;
+  }
+
+  const race = await Race.findById(raceId);
+  if (!race) {
+    const err = new Error('Race not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const team = await Team.findById(teamId).populate('staff');
+  if (!team) {
+    const err = new Error('Team not found');
+    err.status = 404;
+    throw err;
+  }
+
+  const alreadyCompleted = (race.completedEntries || []).some(
+    (entry) => String(entry.team) === String(teamId),
+  );
+  if (alreadyCompleted) {
+    const err = new Error('This team already completed this race');
+    err.status = 400;
+    throw err;
+  }
+
+  const season = await getOrCreateSeason();
+  const raceWeek = race.seasonWeek || 1;
+  if (raceWeek > season.currentWeek) {
+    const err = new Error(
+      `This race opens in week ${raceWeek}. Current season week is ${season.currentWeek}.`,
+    );
+    err.status = 400;
+    throw err;
+  }
+
+  const stageUnlock = await isStageUnlockedForTeam(race, teamId);
+  if (!stageUnlock.ok) {
+    const err = new Error(stageUnlock.error);
+    err.status = 400;
+    throw err;
+  }
+
+  const riders = await Cyclist.find({ _id: { $in: cyclistIds } });
+  if (riders.length !== cyclistIds.length) {
+    const err = new Error('One or more cyclists not found');
+    err.status = 400;
+    throw err;
+  }
+
+  await Promise.all(riders.map(async (rider) => {
+    if (!rider.name || !String(rider.name).trim()) {
+      rider.name = `Rider ${String(rider._id).slice(-4)}`;
+      await Cyclist.updateOne({ _id: rider._id }, { $set: { name: rider.name } });
+    }
+  }));
+
+  const injuredRiders = riders.filter((rider) => isInjured(rider));
+  if (injuredRiders.length) {
+    const err = new Error(
+      `Injured riders cannot start: ${injuredRiders.map((r) => r.name).join(', ')}`,
+    );
+    err.status = 400;
+    throw err;
+  }
+
+  const rosterIds = (team.roster || []).map((id) => String(id));
+  if (rosterIds.length > 0) {
+    const offRoster = cyclistIds.filter((id) => !rosterIds.includes(String(id)));
+    if (offRoster.length) {
+      const err = new Error('All selected riders must be on the team roster');
+      err.status = 400;
+      throw err;
+    }
+  }
+
+  return { race, team, teamId, cyclistIds, riders };
+}
+
 app.post('/api/races/:id/enter', async (req, res) => {
   try {
-    const { teamId, cyclistIds, tactic: rawTactic, roles: rawRoles } = req.body;
+    const { tactic: rawTactic, roles: rawRoles } = req.body;
+    const ctx = await loadRaceEntryContext(req.params.id, req.body);
 
-    if (!teamId || !Array.isArray(cyclistIds)) {
-      return res.status(400).json({ error: 'teamId and cyclistIds[] are required' });
-    }
-    if (cyclistIds.length < 3 || cyclistIds.length > 8) {
-      return res.status(400).json({ error: 'Select between 3 and 8 riders' });
-    }
-
-    const race = await Race.findById(req.params.id);
-    if (!race) return res.status(404).json({ error: 'Race not found' });
-
-    const team = await Team.findById(teamId).populate('staff');
-    if (!team) return res.status(404).json({ error: 'Team not found' });
-
-    const alreadyCompleted = (race.completedEntries || []).some(
-      (entry) => String(entry.team) === String(teamId),
-    );
-    if (alreadyCompleted) {
-      return res.status(400).json({ error: 'This team already completed this race' });
-    }
-
-    const season = await getOrCreateSeason();
-    const raceWeek = race.seasonWeek || 1;
-    if (raceWeek > season.currentWeek) {
-      return res.status(400).json({
-        error: `This race opens in week ${raceWeek}. Current season week is ${season.currentWeek}.`,
-      });
-    }
-
-    const stageUnlock = await isStageUnlockedForTeam(race, teamId);
-    if (!stageUnlock.ok) {
-      return res.status(400).json({ error: stageUnlock.error });
-    }
-
-    const riders = await Cyclist.find({ _id: { $in: cyclistIds } });
-    if (riders.length !== cyclistIds.length) {
-      return res.status(400).json({ error: 'One or more cyclists not found' });
-    }
-
-    // Repair legacy/bad docs with missing names so validation does not blow up mid-race
-    await Promise.all(riders.map(async (rider) => {
-      if (!rider.name || !String(rider.name).trim()) {
-        rider.name = `Rider ${String(rider._id).slice(-4)}`;
-        await Cyclist.updateOne({ _id: rider._id }, { $set: { name: rider.name } });
-      }
-    }));
-
-    const injuredRiders = riders.filter((rider) => isInjured(rider));
-    if (injuredRiders.length) {
-      return res.status(400).json({
-        error: `Injured riders cannot start: ${injuredRiders.map((r) => r.name).join(', ')}`,
-      });
-    }
-
-    const rosterIds = (team.roster || []).map((id) => String(id));
-    if (rosterIds.length > 0) {
-      const offRoster = cyclistIds.filter((id) => !rosterIds.includes(String(id)));
-      if (offRoster.length) {
-        return res.status(400).json({ error: 'All selected riders must be on the team roster' });
-      }
-    }
-
-    const staffBonus = staffTacticBonus(team.staff || []);
+    const staffBonus = staffTacticBonus(ctx.team.staff || []);
     const tactic = normalizeTactic(rawTactic);
-    const roles = normalizeRoles(cyclistIds, rawRoles || {});
+    const roles = normalizeRoles(ctx.cyclistIds, rawRoles || {});
     const roleKey = Object.values(roles).sort().join('-');
-    const seed = `${race._id}-${teamId}-${race.date || ''}-${tactic}-${roleKey}`;
+    const seed = `${ctx.race._id}-${ctx.teamId}-${ctx.race.date || ''}-${tactic}-${roleKey}`;
 
-    const rosterSet = new Set(team.roster.map((id) => String(id)));
-    cyclistIds.forEach((id) => rosterSet.add(String(id)));
-    team.roster = Array.from(rosterSet);
+    const rosterSet = new Set(ctx.team.roster.map((id) => String(id)));
+    ctx.cyclistIds.forEach((id) => rosterSet.add(String(id)));
+    ctx.team.roster = Array.from(rosterSet);
 
-    const completedTeamIds = (race.completedEntries || []).map((entry) => entry.team);
+    const completedTeamIds = (ctx.race.completedEntries || []).map((entry) => entry.team);
     const rivalSquads = await buildRivalSquads({
-      playerTeamId: teamId,
-      race,
+      playerTeamId: ctx.teamId,
+      race: ctx.race,
       completedTeamIds,
       maxTeams: 5,
       ridersPerTeam: 6,
     });
 
-    const {
-      standings,
-      summary,
-      narrative,
-      formChanges,
-      teamPointsEarned,
-      teamResults,
-      rivalTeamCount,
-      segmentLog,
-      riderRoles,
-    } = simulateRace(race, riders, team.name, {
-      teamId,
+    const sim = simulateRace(ctx.race, ctx.riders, ctx.team.name, {
+      teamId: ctx.teamId,
       seed,
       staffBonus,
       tactic,
@@ -429,113 +451,90 @@ app.post('/api/races/:id/enter', async (req, res) => {
       rivalSquads,
     });
 
-    const allRaceRiders = [
-      ...riders,
-      ...rivalSquads.flatMap((squad) => squad.riders || []),
-    ];
-
-    const injuryRng = createRng(`${seed}-injuries`);
-    const injuryPayload = extractInjuriesFromSegmentLog(segmentLog, allRaceRiders, injuryRng);
-    const injuriesApplied = await applyInjuries(injuryPayload);
-
-    // Persist fatigue/form for every DB rider that raced (player + AI teams)
-    const injuredIds = new Set(injuriesApplied.map((r) => String(r._id)));
-    await Promise.all(formChanges.map(async (change) => {
-      if (injuredIds.has(String(change.cyclist))) return;
-      await Cyclist.updateOne(
-        { _id: change.cyclist },
-        { $set: { fatigue: change.fatigueAfter, form: change.formAfter } },
-      );
-    }));
-
-    // Award points / wins to every participating team
-    for (const row of teamResults || []) {
-      if (!row.teamId) continue;
-      await Team.updateOne(
-        { _id: row.teamId },
-        {
-          $inc: {
-            seasonPoints: row.points || 0,
-            wins: row.bestPosition === 1 ? 1 : 0,
-          },
-        },
-      );
-      const refreshed = await Team.findById(row.teamId).select('seasonPoints');
-      if (refreshed) {
-        await Team.updateOne(
-          { _id: row.teamId },
-          { $set: { ranking: refreshed.seasonPoints || 0 } },
-        );
-      }
-    }
-
-    // Persist entering team's roster selections
-    await Team.updateOne({ _id: teamId }, { $set: { roster: team.roster } });
-
-    const result = await RaceResult.create({
-      race: race._id,
-      team: team._id,
-      riders: cyclistIds,
-      summary,
-      narrative,
-      segmentLog,
+    const populated = await persistRaceOutcome({
+      race: ctx.race,
+      team: ctx.team,
+      teamId: ctx.teamId,
+      cyclistIds: ctx.cyclistIds,
+      riders: ctx.riders,
+      rivalSquads,
+      sim,
+      seed,
       tactic,
-      riderRoles,
-      standings,
-      formChanges,
-      teamPointsEarned,
-      rivalTeamCount,
-      teamResults,
-      injuriesApplied: injuriesApplied.map((rider) => ({
-        cyclist: rider._id,
-        name: rider.name,
-        type: rider.injury.type,
-        weeksRemaining: rider.injury.weeksRemaining,
-        description: rider.injury.description,
-      })),
-      stageRace: race.stageRace || null,
-      stageNumber: race.stageNumber || null,
     });
-
-    race.completedEntries = race.completedEntries || [];
-    const participatedTeamIds = new Set(
-      (teamResults || []).map((row) => String(row.teamId)).filter(Boolean),
-    );
-    participatedTeamIds.add(String(teamId));
-
-    for (const tid of participatedTeamIds) {
-      const already = race.completedEntries.some((entry) => String(entry.team) === tid);
-      if (already) continue;
-      race.completedEntries.push({
-        team: tid,
-        result: result._id,
-        completedAt: new Date(),
-      });
-    }
-    await race.save();
-
-    if (race.stageRace) {
-      for (const row of teamResults || []) {
-        if (!row.teamId) continue;
-        await updateStageRaceGc(race.stageRace, row.teamId, race, {
-          _id: result._id,
-          teamPointsEarned: row.points,
-          teamTimeSeconds: row.bestTimeSeconds || 0,
-          stageWin: row.bestPosition === 1,
-          standings,
-        });
-      }
-    }
-
-    const populated = await RaceResult.findById(result._id)
-      .populate('race')
-      .populate('team')
-      .populate('riders');
 
     res.status(201).send(populated);
   } catch (err) {
     console.error(err);
-    res.status(500).json({ error: err.message });
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+// CM-style interactive race: commentary + mid-race orders
+app.post('/api/races/:id/live/start', async (req, res) => {
+  try {
+    const { tactic: rawTactic, roles: rawRoles } = req.body;
+    const ctx = await loadRaceEntryContext(req.params.id, req.body);
+    const session = await startLiveRaceSession({
+      race: ctx.race,
+      team: ctx.team,
+      teamId: ctx.teamId,
+      cyclistIds: ctx.cyclistIds,
+      riders: ctx.riders,
+      rawTactic,
+      rawRoles,
+    });
+    res.status(201).send(session);
+  } catch (err) {
+    console.error(err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.get('/api/races/live/:sessionId', (req, res) => {
+  const session = getSession(req.params.sessionId);
+  if (!session) return res.status(404).json({ error: 'Race session not found' });
+  const { publicLiveView } = require('./services/raceEngine');
+  res.send({ sessionId: session.id, ...publicLiveView(session.state) });
+});
+
+app.post('/api/races/live/:sessionId/continue', async (req, res) => {
+  try {
+    const session = getSession(req.params.sessionId);
+    if (!session) return res.status(404).json({ error: 'Race session not found' });
+    const race = await Race.findById(session.raceId);
+    const team = await Team.findById(session.teamId);
+    if (!race || !team) return res.status(404).json({ error: 'Race or team missing' });
+
+    const payload = await continueLiveRace(
+      req.params.sessionId,
+      { tactic: req.body && req.body.tactic },
+      { race, team },
+    );
+    res.send(payload);
+  } catch (err) {
+    console.error(err);
+    res.status(err.status || 500).json({ error: err.message });
+  }
+});
+
+app.post('/api/races/live/:sessionId/finish', async (req, res) => {
+  try {
+    const session = getSession(req.params.sessionId);
+    if (!session) return res.status(404).json({ error: 'Race session not found' });
+    const race = await Race.findById(session.raceId);
+    const team = await Team.findById(session.teamId);
+    if (!race || !team) return res.status(404).json({ error: 'Race or team missing' });
+
+    const payload = await finishLiveRace(
+      req.params.sessionId,
+      { tactic: req.body && req.body.tactic },
+      { race, team },
+    );
+    res.status(201).send(payload);
+  } catch (err) {
+    console.error(err);
+    res.status(err.status || 500).json({ error: err.message });
   }
 });
 
