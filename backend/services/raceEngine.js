@@ -840,6 +840,388 @@ function raceDayScore(rider, profile, scoreContext = {}) {
   return segmentScore(toCompetitor(rider, { isPlayer: true }), profile, scoreContext);
 }
 
+function ordinal(n) {
+  const v = n % 100;
+  if (v >= 11 && v <= 13) return `${n}th`;
+  const map = { 1: 'st', 2: 'nd', 3: 'rd' };
+  return `${n}${map[n % 10] || 'th'}`;
+}
+
+function currentOrderSnapshot(competitors) {
+  return [...competitors]
+    .map((c) => ({
+      name: c.name,
+      isPlayer: c.isPlayer,
+      teamName: c.teamName,
+      teamId: c.teamId,
+      cyclist: c.cyclist,
+      score: Math.round(c.cumulativeScore * 10) / 10,
+      dropped: Boolean(c.dropped),
+    }))
+    .sort((a, b) => {
+      if (a.dropped !== b.dropped) return a.dropped ? 1 : -1;
+      return b.score - a.score;
+    })
+    .map((row, index) => ({ ...row, position: index + 1 }));
+}
+
+function buildCmIntro(race, teamName, tactic, rivalSquads, riderRoles) {
+  const tacticInfo = TACTICS[normalizeTactic(tactic)];
+  const leader = (riderRoles || []).find((r) => r.role === 'leader');
+  const lines = [
+    `*** ${race.name} — race day ***`,
+    `${num(race.distance, 180)} km of ${race.profile || 'road'} racing. Prestige ${num(race.prestige, 50)}.`,
+    `${teamName} leave the bus with a ${tacticInfo.label.toLowerCase()} plan. ${tacticInfo.description}`,
+  ];
+  if (leader) {
+    lines.push(`${leader.name} wears the captain's armband today.`);
+  }
+  if (rivalSquads && rivalSquads.length) {
+    lines.push(
+      `Lined up against you: ${rivalSquads.map((s) => s.teamName).join(', ')}.`,
+    );
+  }
+  lines.push('The flag drops. Here we go…');
+  return lines;
+}
+
+function buildCmSegmentFeed(segment, competitors, teamName, tactic) {
+  const lines = [];
+  const profileHooks = {
+    flat: `Wide roads and a fast bunch through ${segment.label}.`,
+    hilly: `Rolling terrain now — ${segment.label}. Someone will try something.`,
+    mountain: `The road tilts skyward on ${segment.label}. This is where the race can explode.`,
+    classic: `Classic roads: ${segment.label}. Positioning is everything.`,
+    tt: `Against the clock on ${segment.label}. Pure effort.`,
+  };
+  lines.push(profileHooks[segment.profile] || `Through ${segment.label}.`);
+
+  (segment.events || []).forEach((event) => lines.push(event));
+  (segment.randomEvents || []).forEach((event) => {
+    if (event && event.message) lines.push(event.message);
+  });
+
+  const order = currentOrderSnapshot(competitors);
+  const active = order.filter((r) => !r.dropped);
+  const bestPlayer = active.find((r) => r.isPlayer);
+  if (bestPlayer) {
+    if (bestPlayer.position === 1) {
+      lines.push(`Superb from ${teamName} — ${bestPlayer.name} hits the front!`);
+    } else if (bestPlayer.position <= 5) {
+      lines.push(
+        `Good news in the team car: ${bestPlayer.name} is ${ordinal(bestPlayer.position)} overall.`,
+      );
+    } else if (bestPlayer.position <= 12) {
+      lines.push(
+        `${bestPlayer.name} sits ${ordinal(bestPlayer.position)} — ${teamName} still in the hunt.`,
+      );
+    } else {
+      lines.push(
+        `Worrying signs: ${bestPlayer.name} is back in ${ordinal(bestPlayer.position)}. Time for fresh orders?`,
+      );
+    }
+  }
+
+  const leader = active[0];
+  if (leader && !leader.isPlayer) {
+    lines.push(`${leader.name} (${leader.teamName || 'the field'}) sets the virtual pace.`);
+  }
+
+  lines.push(`Race orders remain: ${TACTICS[normalizeTactic(tactic)].label}.`);
+  return lines;
+}
+
+function buildCmDecisionPrompt(nextSegment, remaining) {
+  if (!nextSegment) return ['The finish line is in sight — no more changes.'];
+  return [
+    '— Team radio —',
+    `Next: ${nextSegment.label} (${nextSegment.profile}, ${nextSegment.km} km). ${remaining} segment(s) left.`,
+    'Change your race orders from the car, or stick with the plan and roll on.',
+  ];
+}
+
+/**
+ * Interactive CM-style race: create state, then stepLiveRace per segment.
+ * RNG lives on the state object (in-memory sessions).
+ */
+function createLiveRaceState(race, riders, teamName, options = {}) {
+  const teamId = options.teamId || 'team';
+  const tactic = normalizeTactic(options.tactic);
+  const rolesMap = normalizeRoles(
+    riders.map((rider) => rider._id),
+    options.roles || {},
+  );
+  const roleKey = Object.values(rolesMap).sort().join('-');
+  const seed = options.seed || `${race._id}-${teamId}-${race.date || ''}-${tactic}-${roleKey}`;
+  const rng = createRng(seed);
+  const staffBonus = options.staffBonus || 0;
+  const rivalSquads = Array.isArray(options.rivalSquads) ? options.rivalSquads : [];
+  const segments = buildSegments(race);
+  const totalDistance = segments.reduce((sum, segment) => sum + segment.km, 0);
+
+  const competitors = riders.map((rider) => toCompetitor(rider, {
+    isPlayer: true,
+    cyclist: rider._id,
+    teamId,
+    teamName,
+    role: rolesMap[String(rider._id)] || 'domestique',
+    tactic,
+    staffBonus,
+  }));
+
+  const allDbRiders = [...riders];
+  rivalSquads.forEach((squad) => {
+    (squad.riders || []).forEach((rider) => {
+      allDbRiders.push(rider);
+      competitors.push(toCompetitor(rider, {
+        isPlayer: false,
+        cyclist: rider._id,
+        teamId: squad.teamId,
+        teamName: squad.teamName || 'Rival team',
+        role: (squad.roles && squad.roles[String(rider._id)]) || 'domestique',
+        tactic: squad.tactic || 'balanced',
+        staffBonus: squad.staffBonus || 0,
+      }));
+    });
+  });
+
+  const padCount = Math.max(0, 8 - Math.max(0, competitors.length - riders.length));
+  if (padCount > 0) {
+    makeRivals(race.profile || 'flat', rng, padCount).forEach((rival) => {
+      competitors.push(toCompetitor(rival, { isPlayer: false, teamName: 'Wild card' }));
+    });
+  }
+
+  const riderRoles = riders.map((rider) => ({
+    cyclist: rider._id,
+    name: rider.name,
+    role: rolesMap[String(rider._id)] || 'domestique',
+  }));
+
+  const feed = buildCmIntro(race, teamName, tactic, rivalSquads, riderRoles);
+  const next = segments[0];
+  feed.push(...buildCmDecisionPrompt(next, segments.length));
+
+  return {
+    seed,
+    race,
+    teamId,
+    teamName,
+    tactic,
+    staffBonus,
+    rolesMap,
+    riderRoles,
+    rivalSquads,
+    riders: allDbRiders,
+    playerRiderIds: riders.map((r) => r._id),
+    segments,
+    totalDistance,
+    competitors,
+    segmentLog: [],
+    kmCursor: 0,
+    segmentIndex: 0,
+    rng,
+    status: 'awaiting_orders',
+    feed,
+    tacticHistory: [{ segmentIndex: 0, tactic }],
+  };
+}
+
+function applyPlayerTactic(state, rawTactic) {
+  const tactic = normalizeTactic(rawTactic);
+  state.tactic = tactic;
+  state.competitors.forEach((c) => {
+    if (c.isPlayer) c.tactic = tactic;
+  });
+  return tactic;
+}
+
+function stepLiveRace(state, options = {}) {
+  if (state.status === 'finished') {
+    return { done: true, state, lines: [], standingsPreview: currentOrderSnapshot(state.competitors) };
+  }
+
+  const prevTactic = state.tactic;
+  if (options.tactic != null) {
+    const nextTactic = applyPlayerTactic(state, options.tactic);
+    if (nextTactic !== prevTactic) {
+      state.feed.push(
+        `*** Orders from the car: switch to ${TACTICS[nextTactic].label}. ***`,
+      );
+      state.tacticHistory.push({ segmentIndex: state.segmentIndex, tactic: nextTactic });
+    }
+  }
+
+  if (state.segmentIndex >= state.segments.length) {
+    state.status = 'finished';
+    return { done: true, state, lines: [], standingsPreview: currentOrderSnapshot(state.competitors) };
+  }
+
+  const segment = state.segments[state.segmentIndex];
+  state.kmCursor += segment.km;
+  const context = {
+    rng: state.rng,
+    race: state.race,
+    staffBonus: state.staffBonus,
+    tactic: state.tactic,
+    segmentMeta: {
+      isLastSegment: state.segmentIndex === state.segments.length - 1,
+      segmentIndex: state.segmentIndex,
+    },
+  };
+
+  const logEntry = resolveSegment(
+    state.competitors,
+    segment,
+    state.kmCursor,
+    state.totalDistance,
+    context,
+  );
+  state.segmentLog.push(logEntry);
+
+  const lines = buildCmSegmentFeed(logEntry, state.competitors, state.teamName, state.tactic);
+  state.feed.push(...lines);
+  state.segmentIndex += 1;
+
+  const remaining = state.segments.length - state.segmentIndex;
+  if (remaining > 0) {
+    const decision = buildCmDecisionPrompt(state.segments[state.segmentIndex], remaining);
+    state.feed.push(...decision);
+    state.status = 'awaiting_orders';
+    return {
+      done: false,
+      state,
+      lines: [...lines, ...decision],
+      standingsPreview: currentOrderSnapshot(state.competitors),
+      nextSegment: state.segments[state.segmentIndex],
+      remaining,
+    };
+  }
+
+  state.status = 'finished';
+  const closing = [
+    '— Finish —',
+    'The race is over. Final classifications coming through…',
+  ];
+  state.feed.push(...closing);
+  return {
+    done: true,
+    state,
+    lines: [...lines, ...closing],
+    standingsPreview: currentOrderSnapshot(state.competitors),
+    remaining: 0,
+  };
+}
+
+function finalizeLiveRace(state) {
+  while (state.segmentIndex < state.segments.length) {
+    stepLiveRace(state, {});
+  }
+
+  const standings = state.competitors
+    .map((competitor) => ({
+      name: competitor.name,
+      cyclist: competitor.cyclist,
+      isPlayer: competitor.isPlayer,
+      teamId: competitor.teamId,
+      teamName: competitor.teamName,
+      score: Math.round(competitor.cumulativeScore * 10) / 10,
+      dropped: competitor.dropped,
+    }))
+    .sort((a, b) => b.score - a.score);
+
+  standings.forEach((row, index) => {
+    row.position = index + 1;
+    row.points = POINTS[index] || 0;
+  });
+
+  assignRaceTimes(standings, state.race.distance || state.totalDistance);
+
+  const narrative = state.feed.slice();
+  const winner = standings[0];
+  const bestPlayer = standings.find((row) => row.isPlayer);
+  narrative.push(`${winner.name} wins${winner.isPlayer ? ` for ${state.teamName}` : ''}.`);
+  if (bestPlayer) {
+    narrative.push(
+      `${state.teamName} best: ${bestPlayer.name} in P${bestPlayer.position} (${bestPlayer.points} pts).`,
+    );
+  }
+
+  const formChanges = applyConditionTick(
+    state.riders,
+    standings,
+    state.race,
+    state.competitors,
+  );
+  const teamPointsEarned = standings
+    .filter((row) => row.isPlayer)
+    .reduce((sum, row) => sum + (row.points || 0), 0);
+
+  const teamResultsMap = new Map();
+  standings.forEach((row) => {
+    if (!row.teamId) return;
+    const key = String(row.teamId);
+    const prev = teamResultsMap.get(key) || {
+      teamId: row.teamId,
+      teamName: row.teamName,
+      isPlayer: Boolean(row.isPlayer),
+      points: 0,
+      bestPosition: row.position,
+      bestTimeSeconds: row.timeSeconds,
+      bestRider: row.name,
+    };
+    prev.points += row.points || 0;
+    if (row.position < prev.bestPosition) {
+      prev.bestPosition = row.position;
+      prev.bestTimeSeconds = row.timeSeconds;
+      prev.bestRider = row.name;
+    }
+    if (row.isPlayer) prev.isPlayer = true;
+    if (row.teamName) prev.teamName = row.teamName;
+    teamResultsMap.set(key, prev);
+  });
+  const teamResults = Array.from(teamResultsMap.values())
+    .sort((a, b) => (a.bestTimeSeconds - b.bestTimeSeconds) || (b.points - a.points));
+
+  standings.forEach((row) => {
+    delete row.dropped;
+  });
+
+  return {
+    standings,
+    narrative,
+    summary: narrative.join(' '),
+    formChanges,
+    teamPointsEarned,
+    teamResults,
+    rivalTeamCount: (state.rivalSquads || []).length,
+    segmentLog: state.segmentLog,
+    segments: state.segments,
+    seed: state.seed,
+    tactic: state.tactic,
+    riderRoles: state.riderRoles,
+    staffBonus: Math.round(state.staffBonus * 10) / 10,
+    tacticHistory: state.tacticHistory,
+  };
+}
+
+function publicLiveView(state) {
+  const remaining = Math.max(0, state.segments.length - state.segmentIndex);
+  return {
+    status: state.status,
+    tactic: state.tactic,
+    feed: state.feed.slice(),
+    standingsPreview: currentOrderSnapshot(state.competitors).slice(0, 8),
+    segmentIndex: state.segmentIndex,
+    segmentTotal: state.segments.length,
+    remaining,
+    nextSegment: remaining > 0 ? state.segments[state.segmentIndex] : null,
+    raceName: state.race && state.race.name,
+    teamName: state.teamName,
+    tactics: TACTICS,
+  };
+}
+
 module.exports = {
   simulateRace,
   profileSkill,
@@ -849,6 +1231,11 @@ module.exports = {
   buildSegments,
   raceDayScore,
   assignRaceTimes,
+  createLiveRaceState,
+  stepLiveRace,
+  finalizeLiveRace,
+  publicLiveView,
+  applyPlayerTactic,
   TACTICS,
   VALID_TACTICS,
   RIDER_ROLES,
