@@ -9,8 +9,16 @@ const StandingSchema = new mongoose.Schema({
     default: null,
   },
   isPlayer: { type: Boolean, default: false },
+  teamId: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'Team',
+    default: null,
+  },
+  teamName: { type: String, default: '' },
   score: Number,
   points: { type: Number, default: 0 },
+  timeSeconds: { type: Number, default: 0 },
+  gapSeconds: { type: Number, default: 0 },
 }, { _id: false });
 
 const FormChangeSchema = new mongoose.Schema({
@@ -33,6 +41,17 @@ const SegmentTopSchema = new mongoose.Schema({
   isPlayer: { type: Boolean, default: false },
 }, { _id: false });
 
+// Note: field named "type" must use { type: String } or Mongoose treats the
+// whole subdocument as a String (classic CastError on arrays of objects).
+const RandomEventSchema = new mongoose.Schema({
+  type: { type: String },
+  kind: { type: String },
+  rider: { type: String },
+  isPlayer: { type: Boolean, default: false },
+  scoreDelta: { type: Number },
+  message: { type: String },
+}, { _id: false });
+
 const SegmentLogSchema = new mongoose.Schema({
   kmStart: Number,
   kmEnd: Number,
@@ -41,14 +60,7 @@ const SegmentLogSchema = new mongoose.Schema({
   leader: String,
   leaderIsPlayer: { type: Boolean, default: false },
   events: [String],
-  randomEvents: [{
-    type: String,
-    kind: String,
-    rider: String,
-    isPlayer: { type: Boolean, default: false },
-    scoreDelta: Number,
-    message: String,
-  }],
+  randomEvents: [RandomEventSchema],
   topThree: [SegmentTopSchema],
 }, { _id: false });
 
@@ -85,12 +97,22 @@ const RaceResultSchema = new mongoose.Schema({
   standings: [StandingSchema],
   formChanges: [FormChangeSchema],
   teamPointsEarned: { type: Number, default: 0 },
+  rivalTeamCount: { type: Number, default: 0 },
+  teamResults: [{
+    teamId: { type: mongoose.Schema.Types.ObjectId, ref: 'Team' },
+    teamName: { type: String },
+    isPlayer: { type: Boolean, default: false },
+    points: { type: Number, default: 0 },
+    bestPosition: { type: Number },
+    bestTimeSeconds: { type: Number, default: 0 },
+    bestRider: { type: String, default: '' },
+  }],
   injuriesApplied: [{
     cyclist: { type: mongoose.Schema.Types.ObjectId, ref: 'Cyclist' },
-    name: String,
-    type: String,
-    weeksRemaining: Number,
-    description: String,
+    name: { type: String },
+    type: { type: String },
+    weeksRemaining: { type: Number },
+    description: { type: String },
   }],
   stageRace: {
     type: mongoose.Schema.Types.ObjectId,

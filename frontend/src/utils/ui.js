@@ -61,3 +61,18 @@ export function formatMoney(value) {
   const n = Number(value) || 0;
   return n.toLocaleString('en-US', { style: 'currency', currency: 'USD', maximumFractionDigits: 0 });
 }
+
+export function formatRaceTime(totalSeconds) {
+  const s = Math.max(0, Math.round(Number(totalSeconds) || 0));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+  return `${m}:${String(sec).padStart(2, '0')}`;
+}
+
+export function formatGap(seconds) {
+  const s = Math.max(0, Math.round(Number(seconds) || 0));
+  if (!s) return '';
+  return `+${formatRaceTime(s)}`;
+}

@@ -17,6 +17,35 @@
         </div>
       </section>
 
+      <div v-if="seasonSummary" class="vl-card mb-4">
+        <div class="vl-card-body">
+          <h3 class="h5">Season {{ seasonSummary.champion ? dashboard.season && dashboard.season.year : '' }} wrap-up</h3>
+          <p class="mb-2">{{ seasonSummary.headline }}</p>
+          <div class="row small">
+            <div class="col-md-4" v-if="seasonSummary.champion">
+              <strong>Champion</strong>
+              <div>{{ seasonSummary.champion.name }}</div>
+              <div class="text-muted">
+                {{ seasonSummary.champion.seasonPoints }} pts · {{ seasonSummary.champion.wins }} wins
+              </div>
+            </div>
+            <div class="col-md-4" v-if="seasonSummary.budgetLeader">
+              <strong>Budget leader</strong>
+              <div>{{ seasonSummary.budgetLeader.name }}</div>
+              <div class="text-muted">{{ $ui.formatMoney(seasonSummary.budgetLeader.budget) }}</div>
+            </div>
+            <div class="col-md-4" v-if="seasonSummary.mostImproved && seasonSummary.mostImproved.length">
+              <strong>Most improved</strong>
+              <ul class="mb-0 pl-3">
+                <li v-for="r in seasonSummary.mostImproved.slice(0, 3)" :key="r.name">
+                  {{ r.name }} (+{{ r.netDelta }})
+                </li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </div>
+
       <div class="row">
         <div class="col-md-4 mb-3">
           <div class="stat-tile">
@@ -117,6 +146,7 @@ export default {
   data() {
     return {
       loading: true,
+      seasonSummary: null,
       dashboard: {
         season: null,
         topTeams: [],
@@ -134,8 +164,12 @@ export default {
     async load() {
       this.loading = true;
       try {
-        const { data } = await axios.get('/api/dashboard');
-        this.dashboard = data;
+        const [dash, summary] = await Promise.all([
+          axios.get('/api/dashboard'),
+          axios.get('/api/season/summary').catch(() => ({ data: { complete: false } })),
+        ]);
+        this.dashboard = dash.data;
+        this.seasonSummary = summary.data.complete ? summary.data.summary : null;
       } catch (err) {
         // Keep empty dashboard if API fails
       } finally {

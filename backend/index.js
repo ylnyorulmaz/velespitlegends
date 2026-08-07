@@ -36,7 +36,11 @@ const {
   validateRaceSegments,
   createRng,
 } = require('./services/raceEngine');
-const { getOrCreateSeason, advanceSeasonWeek } = require('./services/seasonService');
+const {
+  getOrCreateSeason,
+  advanceSeasonWeek,
+  getSeasonSummary,
+} = require('./services/seasonService');
 const {
   isInjured,
   extractInjuriesFromSegmentLog,
@@ -47,12 +51,14 @@ const {
   updateStageRaceGc,
   isStageUnlockedForTeam,
   createStageRaceWithStages,
+  decorateGcStandings,
 } = require('./services/stageRaceService');
 const {
   listMarketCyclists,
   signCyclist,
   releaseCyclist,
 } = require('./services/transferService');
+const { buildRivalSquads } = require('./services/pelotonService');
 
 const app = express();
 app.use(bodyParser.json());
@@ -61,12 +67,11 @@ app.use(cors());
 const PORT = process.env.PORT || 3000;
 const MONGODB_URI = process.env.MONGODB_URI || 'mongodb://localhost/cycling_management';
 
-mongoose.connect(MONGODB_URI)
-  .then(() => console.log('Connected to MongoDB'))
-  .catch((err) => {
-    console.error('MongoDB connection error:', err.message);
-    process.exit(1);
-  });
+async function connectDb(uri = MONGODB_URI) {
+  if (mongoose.connection.readyState === 1) return mongoose.connection;
+  await mongoose.connect(uri);
+  return mongoose.connection;
+}
 
 app.get('/health', (req, res) => {
   res.status(200).json({ status: 'ok' });
@@ -75,6 +80,12 @@ app.get('/health', (req, res) => {
 // Cyclist routes
 app.get('/api/cyclists', async (req, res) => {
   const cyclists = await Cyclist.find().populate('team');
+  await Promise.all(cyclists.map(async (cyclist) => {
+    if (!cyclist.name || !String(cyclist.name).trim()) {
+      cyclist.name = `Rider ${String(cyclist._id).slice(-4)}`;
+      await Cyclist.updateOne({ _id: cyclist._id }, { $set: { name: cyclist.name } });
+    }
+  }));
   res.send(cyclists.map((cyclist) => ({
     ...cyclist.toObject(),
     marketValue: computeMarketValue(cyclist),
@@ -149,7 +160,9 @@ app.get('/api/stage-races/:id', async (req, res) => {
   if (!stageRace) return res.status(404).json({ error: 'Stage race not found' });
 
   const stages = await Race.find({ stageRace: stageRace._id }).sort({ stageNumber: 1 });
-  res.send({ stageRace, stages });
+  const plain = stageRace.toObject();
+  plain.gcStandings = decorateGcStandings(plain.gcStandings || []);
+  res.send({ stageRace: plain, stages });
 });
 
 app.post('/api/stage-races', async (req, res) => {
@@ -177,6 +190,15 @@ app.get('/api/season', async (req, res) => {
 app.post('/api/season/advance', async (req, res) => {
   try {
     const result = await advanceSeasonWeek();
+    res.send(result);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.get('/api/season/summary', async (req, res) => {
+  try {
+    const result = await getSeasonSummary();
     res.send(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -239,6 +261,36 @@ app.get('/api/tactics', (req, res) => {
 app.get('/api/races', async (req, res) => {
   const races = await Race.find().sort({ date: 1 });
   res.send(races);
+});
+
+app.get('/api/races/:id/rivals', async (req, res) => {
+  try {
+    const race = await Race.findById(req.params.id);
+    if (!race) return res.status(404).json({ error: 'Race not found' });
+    const teamId = req.query.teamId;
+    if (!teamId) return res.status(400).json({ error: 'teamId query required' });
+
+    const completedTeamIds = (race.completedEntries || []).map((entry) => entry.team);
+    const rivalSquads = await buildRivalSquads({
+      playerTeamId: teamId,
+      race,
+      completedTeamIds,
+      maxTeams: 5,
+      ridersPerTeam: 6,
+    });
+
+    res.send({
+      rivalTeamCount: rivalSquads.length,
+      rivals: rivalSquads.map((squad) => ({
+        teamId: squad.teamId,
+        teamName: squad.teamName,
+        riderCount: (squad.riders || []).length,
+        tactic: squad.tactic,
+      })),
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/races', async (req, res) => {
@@ -316,6 +368,14 @@ app.post('/api/races/:id/enter', async (req, res) => {
       return res.status(400).json({ error: 'One or more cyclists not found' });
     }
 
+    // Repair legacy/bad docs with missing names so validation does not blow up mid-race
+    await Promise.all(riders.map(async (rider) => {
+      if (!rider.name || !String(rider.name).trim()) {
+        rider.name = `Rider ${String(rider._id).slice(-4)}`;
+        await Cyclist.updateOne({ _id: rider._id }, { $set: { name: rider.name } });
+      }
+    }));
+
     const injuredRiders = riders.filter((rider) => isInjured(rider));
     if (injuredRiders.length) {
       return res.status(400).json({
@@ -341,37 +401,76 @@ app.post('/api/races/:id/enter', async (req, res) => {
     cyclistIds.forEach((id) => rosterSet.add(String(id)));
     team.roster = Array.from(rosterSet);
 
+    const completedTeamIds = (race.completedEntries || []).map((entry) => entry.team);
+    const rivalSquads = await buildRivalSquads({
+      playerTeamId: teamId,
+      race,
+      completedTeamIds,
+      maxTeams: 5,
+      ridersPerTeam: 6,
+    });
+
     const {
       standings,
       summary,
       narrative,
       formChanges,
       teamPointsEarned,
+      teamResults,
+      rivalTeamCount,
       segmentLog,
       riderRoles,
-    } = simulateRace(race, riders, team.name, { teamId, seed, staffBonus, tactic, roles });
+    } = simulateRace(race, riders, team.name, {
+      teamId,
+      seed,
+      staffBonus,
+      tactic,
+      roles,
+      rivalSquads,
+    });
+
+    const allRaceRiders = [
+      ...riders,
+      ...rivalSquads.flatMap((squad) => squad.riders || []),
+    ];
 
     const injuryRng = createRng(`${seed}-injuries`);
-    const injuryPayload = extractInjuriesFromSegmentLog(segmentLog, riders, injuryRng);
+    const injuryPayload = extractInjuriesFromSegmentLog(segmentLog, allRaceRiders, injuryRng);
     const injuriesApplied = await applyInjuries(injuryPayload);
 
-    // Persist fatigue/form ticks (injured riders may also have updated form from applyInjuries)
-    await Promise.all(riders.map(async (rider) => {
-      const refreshed = await Cyclist.findById(rider._id);
-      if (refreshed && !isInjured(refreshed)) {
-        refreshed.fatigue = rider.fatigue;
-        refreshed.form = rider.form;
-        await refreshed.save();
-      }
+    // Persist fatigue/form for every DB rider that raced (player + AI teams)
+    const injuredIds = new Set(injuriesApplied.map((r) => String(r._id)));
+    await Promise.all(formChanges.map(async (change) => {
+      if (injuredIds.has(String(change.cyclist))) return;
+      await Cyclist.updateOne(
+        { _id: change.cyclist },
+        { $set: { fatigue: change.fatigueAfter, form: change.formAfter } },
+      );
     }));
 
-    if (standings[0] && standings[0].isPlayer) {
-      team.wins = (team.wins || 0) + 1;
+    // Award points / wins to every participating team
+    for (const row of teamResults || []) {
+      if (!row.teamId) continue;
+      await Team.updateOne(
+        { _id: row.teamId },
+        {
+          $inc: {
+            seasonPoints: row.points || 0,
+            wins: row.bestPosition === 1 ? 1 : 0,
+          },
+        },
+      );
+      const refreshed = await Team.findById(row.teamId).select('seasonPoints');
+      if (refreshed) {
+        await Team.updateOne(
+          { _id: row.teamId },
+          { $set: { ranking: refreshed.seasonPoints || 0 } },
+        );
+      }
     }
-    team.seasonPoints = (team.seasonPoints || 0) + teamPointsEarned;
-    // ranking shown as season points standing (higher = better)
-    team.ranking = team.seasonPoints;
-    await team.save();
+
+    // Persist entering team's roster selections
+    await Team.updateOne({ _id: teamId }, { $set: { roster: team.roster } });
 
     const result = await RaceResult.create({
       race: race._id,
@@ -385,6 +484,8 @@ app.post('/api/races/:id/enter', async (req, res) => {
       standings,
       formChanges,
       teamPointsEarned,
+      rivalTeamCount,
+      teamResults,
       injuriesApplied: injuriesApplied.map((rider) => ({
         cyclist: rider._id,
         name: rider.name,
@@ -397,15 +498,33 @@ app.post('/api/races/:id/enter', async (req, res) => {
     });
 
     race.completedEntries = race.completedEntries || [];
-    race.completedEntries.push({
-      team: team._id,
-      result: result._id,
-      completedAt: new Date(),
-    });
+    const participatedTeamIds = new Set(
+      (teamResults || []).map((row) => String(row.teamId)).filter(Boolean),
+    );
+    participatedTeamIds.add(String(teamId));
+
+    for (const tid of participatedTeamIds) {
+      const already = race.completedEntries.some((entry) => String(entry.team) === tid);
+      if (already) continue;
+      race.completedEntries.push({
+        team: tid,
+        result: result._id,
+        completedAt: new Date(),
+      });
+    }
     await race.save();
 
     if (race.stageRace) {
-      await updateStageRaceGc(race.stageRace, team._id, race, result);
+      for (const row of teamResults || []) {
+        if (!row.teamId) continue;
+        await updateStageRaceGc(race.stageRace, row.teamId, race, {
+          _id: result._id,
+          teamPointsEarned: row.points,
+          teamTimeSeconds: row.bestTimeSeconds || 0,
+          stageWin: row.bestPosition === 1,
+          standings,
+        });
+      }
     }
 
     const populated = await RaceResult.findById(result._id)
@@ -531,6 +650,18 @@ if (fs.existsSync(frontendIndex)) {
   });
 }
 
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
+if (require.main === module) {
+  connectDb()
+    .then(() => {
+      console.log('Connected to MongoDB');
+      app.listen(PORT, '0.0.0.0', () => {
+        console.log(`Server running on http://localhost:${PORT}`);
+      });
+    })
+    .catch((err) => {
+      console.error('MongoDB connection error:', err.message);
+      process.exit(1);
+    });
+}
+
+module.exports = { app, connectDb, MONGODB_URI };

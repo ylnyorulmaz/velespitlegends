@@ -124,13 +124,47 @@
       </div>
       <p v-else-if="detail.summary" class="summary">{{ detail.summary }}</p>
 
+      <div v-if="detail.teamResults && detail.teamResults.length" class="mb-4">
+        <h5>Team classification</h5>
+        <table class="table table-sm">
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>Team</th>
+              <th>Best</th>
+              <th>Pts</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="(row, idx) in detail.teamResults"
+              :key="row.teamId || idx"
+              :class="{ 'table-primary': row.isPlayer }"
+            >
+              <td>{{ idx + 1 }}</td>
+              <td>
+                {{ row.teamName }}
+                <span v-if="row.isPlayer" class="badge badge-info">you</span>
+              </td>
+              <td>P{{ row.bestPosition }}</td>
+              <td>{{ row.points }}</td>
+            </tr>
+          </tbody>
+        </table>
+        <p v-if="detail.rivalTeamCount" class="small text-muted">
+          {{ detail.rivalTeamCount }} rival team(s) started this race.
+        </p>
+      </div>
+
       <h5>Standings</h5>
       <table class="table table-sm table-striped">
         <thead>
           <tr>
             <th>Pos</th>
             <th>Rider</th>
-            <th>Score</th>
+            <th>Team</th>
+            <th>Time</th>
+            <th>Gap</th>
             <th>Pts</th>
           </tr>
         </thead>
@@ -145,7 +179,9 @@
               {{ row.name }}
               <span v-if="row.isPlayer" class="badge badge-info">you</span>
             </td>
-            <td>{{ row.score }}</td>
+            <td class="small">{{ row.teamName || '—' }}</td>
+            <td>{{ $ui.formatRaceTime(row.timeSeconds) }}</td>
+            <td class="text-muted">{{ row.position === 1 ? '—' : $ui.formatGap(row.gapSeconds) }}</td>
             <td>{{ row.points }}</td>
           </tr>
         </tbody>

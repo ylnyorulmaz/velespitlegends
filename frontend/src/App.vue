@@ -82,6 +82,10 @@ export default {
   },
   created() {
     this.loadSeason();
+    this.$root.$on('season-updated', this.onSeasonUpdated);
+  },
+  beforeDestroy() {
+    this.$root.$off('season-updated', this.onSeasonUpdated);
   },
   watch: {
     $route() {
@@ -89,6 +93,10 @@ export default {
     },
   },
   methods: {
+    onSeasonUpdated(season) {
+      if (season) this.season = season;
+      else this.loadSeason();
+    },
     async loadSeason() {
       try {
         const { data } = await axios.get('/api/season');

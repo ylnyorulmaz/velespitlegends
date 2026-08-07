@@ -5,11 +5,15 @@ const StageResultSchema = new mongoose.Schema({
   race: { type: mongoose.Schema.Types.ObjectId, ref: 'Race' },
   result: { type: mongoose.Schema.Types.ObjectId, ref: 'RaceResult' },
   points: { type: Number, default: 0 },
+  timeSeconds: { type: Number, default: 0 },
+  gapSeconds: { type: Number, default: 0 },
+  bestRider: { type: String, default: '' },
 }, { _id: false });
 
 const GcStandingSchema = new mongoose.Schema({
   team: { type: mongoose.Schema.Types.ObjectId, ref: 'Team', required: true },
   totalPoints: { type: Number, default: 0 },
+  totalTimeSeconds: { type: Number, default: 0 },
   stageWins: { type: Number, default: 0 },
   stagesCompleted: { type: Number, default: 0 },
   stageResults: [StageResultSchema],

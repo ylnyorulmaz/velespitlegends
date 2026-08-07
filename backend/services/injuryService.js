@@ -31,9 +31,10 @@ function extractInjuriesFromSegmentLog(segmentLog, riders, rng = Math.random) {
 
   for (const segment of segmentLog || []) {
     for (const event of segment.randomEvents || []) {
-      if (!event.isPlayer || seen.has(event.rider)) continue;
+      if (seen.has(event.rider)) continue;
       if (event.type !== 'crash' && event.type !== 'illness') continue;
 
+      // Only DB riders (player or AI teams) can receive persistent injuries
       const rider = riderByName.get(event.rider);
       if (!rider) continue;
 
@@ -62,13 +63,25 @@ async function applyInjuries(injuries) {
   for (const injury of injuries) {
     const rider = await Cyclist.findById(injury.cyclist);
     if (!rider) continue;
+    if (!rider.name || !String(rider.name).trim()) {
+      rider.name = injury.name || `Rider ${String(rider._id).slice(-4)}`;
+    }
     rider.injury = {
       type: injury.type,
       weeksRemaining: injury.weeksRemaining,
       description: injury.description,
     };
     rider.form = Math.max(1, (rider.form || 70) - (injury.type === 'crash' ? 8 : 4));
-    await rider.save();
+    await Cyclist.updateOne(
+      { _id: rider._id },
+      {
+        $set: {
+          name: rider.name,
+          form: rider.form,
+          injury: rider.injury,
+        },
+      },
+    );
     updated.push(rider);
   }
   return updated;

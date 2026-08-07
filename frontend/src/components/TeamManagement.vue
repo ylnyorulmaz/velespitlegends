@@ -35,7 +35,15 @@
           <div>
             <strong>{{ t.name }}</strong>
             — {{ t.nationality || '—' }}
-            — budget ${{ t.budget }}
+            — budget {{ money(t.budget) }}
+            <span
+              v-if="weeklyWage(t) > 0"
+              class="text-muted"
+              :class="{ 'text-danger': t.budget < weeklyWage(t) }"
+            >
+              · ~{{ money(weeklyWage(t)) }}/wk wages
+            </span>
+            <span v-if="t.budget < weeklyWage(t)" class="badge badge-danger ml-1">low budget</span>
             — wins {{ t.wins }} / {{ t.seasonPoints || 0 }} pts
             — roster {{ (t.roster && t.roster.length) || 0 }}
             — staff {{ (t.staff && t.staff.length) || 0 }}
@@ -126,6 +134,22 @@ export default {
     this.load();
   },
   methods: {
+    money(value) {
+      if (this.$ui && this.$ui.formatMoney) return this.$ui.formatMoney(value);
+      return `$${Number(value || 0).toLocaleString('en-US')}`;
+    },
+    weeklyWage(team) {
+      const weeks = 30;
+      const riderPay = (team.roster || []).reduce((sum, rider) => {
+        const salary = Number(rider.salary) || 0;
+        return sum + (salary > 0 ? Math.max(1, Math.round(salary / weeks)) : 0);
+      }, 0);
+      const staffPay = (team.staff || []).reduce((sum, member) => {
+        const salary = Number(member.salary) || 0;
+        return sum + (salary > 0 ? Math.max(1, Math.round(salary / weeks)) : 0);
+      }, 0);
+      return riderPay + staffPay;
+    },
     async load() {
       const [teams, cyclists, staff] = await Promise.all([
         axios.get('/api/teams'),

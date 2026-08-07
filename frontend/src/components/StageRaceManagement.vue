@@ -5,7 +5,9 @@
       subtitle="Create multi-stage tours with a general classification."
       eyebrow="Tours"
     />
-    <p class="text-muted mb-4">Multi-stage tours track GC points across linked stages.</p>
+    <p class="text-muted mb-4">
+      Multi-stage tours use <strong>time-based GC</strong> (lowest cumulative time wins), with stage points as a tie-break.
+    </p>
 
     <div class="card mb-4">
       <div class="card-body">
@@ -110,24 +112,26 @@
             </li>
           </ul>
 
-          <h6>GC standings</h6>
+          <h6>General classification (time)</h6>
           <table v-if="tourDetail.stageRace.gcStandings && tourDetail.stageRace.gcStandings.length" class="table table-sm">
             <thead>
               <tr>
                 <th>#</th>
                 <th>Team</th>
-                <th>Pts</th>
-                <th>Stages</th>
+                <th>Time</th>
+                <th>Gap</th>
                 <th>Wins</th>
+                <th>Pts</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="(row, idx) in tourDetail.stageRace.gcStandings" :key="idx">
                 <td>{{ idx + 1 }}</td>
                 <td>{{ row.team && row.team.name }}</td>
-                <td>{{ row.totalPoints }}</td>
-                <td>{{ row.stagesCompleted }}</td>
+                <td>{{ row.gcTimeLabel || $ui.formatRaceTime(row.totalTimeSeconds) }}</td>
+                <td class="text-muted">{{ idx === 0 ? '—' : (row.gcGapLabel || $ui.formatGap(row.gcGapSeconds)) }}</td>
                 <td>{{ row.stageWins }}</td>
+                <td>{{ row.totalPoints }}</td>
               </tr>
             </tbody>
           </table>

@@ -281,9 +281,11 @@ Content-Type: application/json
 }
 ```
 
-**Doğrulamalar:** 3–8 bisikletçi, kadroda olmalı, sakat olmamalı, sezon haftası uygun, etap sırası açık, takım daha önce tamamlamamış olmalı.
+**Doğrulamalar:** 3–8 bisikletçi; takımın kadrosu doluysa hepsi kadroda olmalı; sakat olmamalı; `seasonWeek <= currentWeek`; etap sırası açık; takım daha önce tamamlamamış olmalı.
 
-**Yanıt:** `201` + populate edilmiş `RaceResult` (race, team, riders).
+**Yanıt:** `201` + populate edilmiş `RaceResult` (race, team, riders) — `segmentLog`, `narrative`, `formChanges`, `injuriesApplied` dahil.
+
+**Not:** Enter sırasında boş `name`’li bisikletçiler `Rider <id>` ile onarılır; form/fatigue `updateOne` ile yazılır (tam doküman validasyonunu atlar).
 
 ---
 
@@ -364,13 +366,44 @@ Tasarım sistemi: `frontend/src/assets/styles.css` (CSS custom properties, DM Sa
 
 ---
 
+## Sezon ekonomisi ve gelişim (Faz 6)
+
+Hafta ilerletince (`POST /api/season/advance` / Calendar → **Advance week**):
+
+1. **İyileşme** — tüm bisikletçiler fatigue −5, form +1  
+2. **Maaş** — kadro + personel season salary / `totalWeeks` kadar bütçeden düşülür; bütçe yetmezse form −2  
+3. **Gelişim** — genç + yüksek potential → skill +1 şansı; 33+ → skill −1 şansı  
+4. **Sakatlık tick** — mevcut recovery devam eder  
+
+Testler (`npm test --prefix backend`):
+
+| Komut | Ne |
+|-------|-----|
+| `npm test --prefix backend` | Unit + feature (Node `node:test`, in-memory Mongo) |
+| `npm run test:unit --prefix backend` | DB yok — raceEngine, development, injury, GC formatters |
+| `npm run test:feature --prefix backend` | Enter race, season, transfers, schema, rivals |
+| `npm run test:smoke --prefix backend` | Eski hızlı smoke (DB yok) |
+
+## Çok takımlı yarış
+
+Yarışa girince kadrosu olan diğer takımlar otomatik pelotona katılır (`pelotonService` → en fazla 5 takım, takım başına ~6 rider). AI takımlar profile göre taktik/rol seçer, puan ve form alır, `completedEntries`'e yazılır. Calendar'da rival preview; Results'ta team classification.
+
+`GET /api/races/:id/rivals?teamId=...`
+
+## Zaman bazlı etap GC
+
+Stage race GC **kümülatif süre** ile sıralanır (en düşük zaman kazanır). Her etapta takımın en iyi bisikletçisinin süresi GC'ye eklenir; stage points yedek kırılım. Results'ta Time/Gap; Stage Races sayfasında GC time + gap.
+
+## Sezon sonu özeti
+
+Son hafta ilerleyince (veya sezon `completed` olunca) `GET /api/season/summary`: şampiyon, bütçe lideri, en çok gelişen/düşen rider'lar, top scorer'lar. Calendar ve Home'da gösterilir.
+
 ## Bilinen sınırlamalar / gelecek iş
 
-- Otomatik test suite yok
-- AI rakipler prosedürel (DB'deki diğer takımlar birlikte yarışmıyor)
-- `potential` / `age` gelişim için henüz kullanılmıyor
-- Haftalık maaş kesintisi yok
-- Etap GC takım puanı bazlı (zaman farkı değil)
+- Bireysel (sarı mayo) GC yok — GC takım bazlı
+- Sezon reset / yeni sezon başlatma UI'sı yok
+- Root `.gitignore` `dist/` içerir — PandaStack ücretsiz tier prebuilt `frontend/dist` istiyorsa deploy için dist'i ayrıca yönetin / ignore kuralını gözden geçirin
+- `dotenv` paketi yok; `backend/index.js` `.env`'yi elle okur
 
 ---
 
@@ -380,9 +413,33 @@ Tasarım sistemi: `frontend/src/assets/styles.css` (CSS custom properties, DM Sa
 |---------|-------------|-------|
 | Boş sayfa | `frontend/dist` yok | `npm run build --prefix frontend` |
 | MongoDB hatası | Yanlış URI / IP engeli | `.env` ve Atlas Network Access |
-| Yarışa giremiyorum | Hafta / sakatlık / etap sırası | API hata mesajını okuyun |
+| Yarışa giremiyorum | Hafta / sakatlık / etap sırası / kadro | API hata mesajını okuyun |
+| `Cast to [string] failed` on `randomEvents` | Mongoose `type` alanı tuzağı | `RaceResult` şemasında `type: { type: String }` kullanın (aşağıya bakın) |
+| `Cyclist validation failed: name` | Eski/boş isimli kayıt | Liste/enter sırasında isim onarılır; kartlarda `Rider xxxx` görebilirsiniz |
+| Bisikletçi kartında isim yok | DB'de boş `name` | Sayfayı yenileyin (`GET /api/cyclists` onarır) |
 | 502 deploy | PORT / health | `GET /health`, env değişkenleri |
 | CORS (dev) | Doğrudan dosya açma | Webpack dev server `:8080` kullanın |
+
+### Mongoose `type` alanı tuzağı
+
+Alt dokümanda alan adı `type` ise **asla** şunu yazmayın:
+
+```js
+randomEvents: [{ type: String, kind: String, message: String }]
+```
+
+Mongoose bunu “dizi elemanı String” sanır → `Cast to [string] failed` (Proxy/object). Doğrusu:
+
+```js
+randomEvents: [{
+  type: { type: String },
+  kind: { type: String },
+  message: { type: String },
+  // ...
+}]
+```
+
+Aynı kural `injuriesApplied[].type` ve `Cyclist.injury.type` için de geçerli.
 
 ---
 

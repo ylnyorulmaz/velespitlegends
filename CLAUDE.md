@@ -2,6 +2,9 @@
 
 **Claude Code** ve Claude tabanlı asistanlar için proje bağlam dosyası.
 
+İnsan odaklı genel bakış: **README.md**  
+Otonom agent git/PR kuralları: **AGENTS.md**
+
 ---
 
 ## Bu proje nedir?
@@ -10,10 +13,10 @@ Velespit Legends, **tarayıcı tabanlı bisiklet takım yöneticisi** simülasyo
 
 - Bisikletçi ve takım oluşturursunuz
 - Taktik ve roller seçersiniz
-- Yarışlar segment segment simüle edilir
+- Yarışlar segment segment simüle edilir (gerçek zamanlı değil)
 - Sezon, sıralama, etap yarışları, transferler ve sakatlıklar ilerler
 
-**Gerçek zamanlı değil** — her yarış `POST /api/races/:id/enter` ile anında simüle edilir.
+Ana döngü: Calendar → `POST /api/races/:id/enter` → `raceEngine.simulateRace()` → sakatlık/GC → Results.
 
 ---
 
@@ -26,7 +29,7 @@ MongoDB                                    →  veri
 Node 20+                                   →  runtime
 ```
 
-Tek deploy birimi: Express `/api/*` ve `frontend/dist` statik dosyalarını sunar.
+Tek deploy birimi: Express `/api/*` ve (varsa) `frontend/dist` sunar.
 
 ---
 
@@ -39,22 +42,19 @@ cd velespitlegends
 npm ci --prefix backend
 npm ci --prefix frontend && npm run build --prefix frontend
 
-# backend/.env oluştur:
-# MONGODB_URI=mongodb+srv://...
+# backend/.env:
+# MONGODB_URI=mongodb+srv://.../cycling_management?retryWrites=true&w=majority
 # PORT=3000
 
 npm start
 # → http://localhost:3000
 ```
 
-Frontend geliştirme (HMR):
+Frontend HMR:
 
 ```bash
-# Terminal 1
 cd backend && npm start          # :3000
-
-# Terminal 2
-cd frontend && npm run serve     # :8080, /api proxy
+cd frontend && npm run serve     # :8080, /api → :3000
 ```
 
 ---
@@ -64,24 +64,25 @@ cd frontend && npm run serve     # :8080, /api proxy
 ```
 Kullanıcı (Calendar.vue)
     → POST /api/races/:id/enter { teamId, cyclistIds, tactic, roles }
-        → raceEngine.simulateRace()
-        → injuryService (kalıcı sakatlık)
-        → stageRaceService (GC güncelleme)
-        → RaceResult kaydet
-    → /results/:id yönlendirme
+        → season / stage / injury / roster doğrulamaları
+        → boş name onarımı (legacy docs)
+        → raceEngine.simulateRace(seed, tactic, roles, staffBonus)
+        → injuryService (crash/illness → kalıcı sakatlık)
+        → form/fatigue updateOne
+        → RaceResult.create (segmentLog + randomEvents)
+        → stageRaceService GC (varsa)
+    → /results/:id
 ```
 
-### Sezon kilidi
+### Kilitlemeler
 
-Yarışların `seasonWeek` alanı vardır. Sadece `seasonWeek <= season.currentWeek` olan yarışlara girilebilir. Hafta ilerletme: `POST /api/season/advance`.
-
-### Etap yarışları
-
-Yarışlar `race.stageRace` + `race.stageNumber` ile tura bağlanır. Etap N, aynı takım için etap N−1 tamamlanmadan açılmaz (`isStageUnlockedForTeam`).
-
-### Tek tamamlama
-
-Her takım her yarışı bir kez tamamlayabilir (`race.completedEntries`).
+| Kural | Detay |
+|-------|--------|
+| Sezon | `race.seasonWeek <= season.currentWeek` |
+| Tek tamamlama | `race.completedEntries` — takım başına bir kez |
+| Etap sırası | Etap N, aynı takım için N−1 bitmeden açılmaz |
+| Kadro | Roster doluysa tüm seçilenler kadroda olmalı; 3–8 rider |
+| Sakatlık | `injury.type !== 'none'` ve `weeksRemaining > 0` → start yok |
 
 ---
 
@@ -90,29 +91,49 @@ Her takım her yarışı bir kez tamamlayabilir (`race.completedEntries`).
 | Dosya | Neden |
 |-------|-------|
 | `backend/services/raceEngine.js` | Segment, taktik, rol, olay, puanlama |
-| `backend/index.js` | Tüm API route'ları; yarış giriş orchestration |
-| `backend/services/injuryService.js` | Kaza/hastalık → kalıcı sakatlık |
-| `backend/services/seasonService.js` | Sezon + hafta ilerletme |
-| `backend/services/stageRaceService.js` | Etap yarışı + GC |
-| `backend/services/transferService.js` | İmzala/bırak + piyasa değeri |
+| `backend/index.js` | Tüm API + enter orchestration |
+| `backend/models/RaceResult.js` | `randomEvents` şema tuzağı notu |
+| `backend/services/injuryService.js` | Kalıcı sakatlık |
+| `backend/services/seasonService.js` | Hafta ilerletme |
+| `backend/services/stageRaceService.js` | Etap + GC |
+| `backend/services/transferService.js` | İmzala/bırak |
 | `frontend/src/components/Calendar.vue` | Ana oyun UI |
 | `frontend/src/components/Results.vue` | Segment timeline |
 | `frontend/src/assets/styles.css` | Tasarım sistemi |
 
 ---
 
-## Veri modelleri
+## Kritik gotcha: Mongoose `type`
+
+Alt dokümanda alan adı `type` ise:
+
+```js
+// YANLIŞ — dizi [String] olur
+randomEvents: [{ type: String, message: String }]
+
+// DOĞRU
+randomEvents: [{ type: { type: String }, message: { type: String } }]
+```
+
+Aksi halde enter sırasında:  
+`RaceResult validation failed: ... Cast to [string] failed ... randomEvents.0`
+
+`injuriesApplied[].type` ve `Cyclist.injury.type` aynı kurala uyar (`injury.type` zaten `{ type: String }` ile yazılmış).
+
+---
+
+## Veri modelleri (özet)
 
 ### Cyclist
 
 ```javascript
 {
-  name: String,           // required
+  name: String,           // required — boşsa API "Rider <id>" yazar
   sprint, climb, timeTrial, endurance, teamwork: Number (1-100),
   form: Number (default 70),
   fatigue: Number (default 20),
   specialty: 'none' | 'cobbles' | 'breakaway' | 'leadout',
-  age, potential, salary: Number,  // Faz 6+ için hazır
+  age, potential, salary: Number,
   team: ObjectId | null,
   injury: { type: 'none'|'crash'|'illness', weeksRemaining, description }
 }
@@ -120,56 +141,31 @@ Her takım her yarışı bir kez tamamlayabilir (`race.completedEntries`).
 
 ### Team
 
-```javascript
-{
-  name: String,
-  nationality: String,
-  budget, wins, ranking, seasonPoints: Number,
-  roster: [ObjectId → Cyclist],
-  staff: [ObjectId → Staff]
-}
-```
+`name`, `nationality`, `budget`, `wins`, `ranking`, `seasonPoints`, `roster[]`, `staff[]`
 
 ### Race
 
-```javascript
-{
-  name: String,
-  date: Date,
-  distance, prestige: Number,
-  profile: 'flat'|'hilly'|'mountain'|'classic'|'tt',
-  seasonWeek: Number,
-  segments: [{ km, profile, label }],  // opsiyonel özel
-  stageRace: ObjectId | null,
-  stageNumber: Number | null,
-  completedEntries: [{ team, result, completedAt }]
-}
-```
+`profile`: flat|hilly|mountain|classic|tt  
+`segments[]` opsiyonel; `seasonWeek`; `stageRace`/`stageNumber`; `completedEntries[]`
 
 ### RaceResult
 
-Simülasyon çıktısı: `standings`, `segmentLog`, `narrative`, `tactic`, `riderRoles`, `injuriesApplied`, `formChanges`, `teamPointsEarned`.
+`standings`, `segmentLog` (events + **randomEvents** objects), `narrative`, `tactic`, `riderRoles`, `injuriesApplied`, `formChanges`, `teamPointsEarned`
 
-### Season
+### Season / StageRace / Staff
 
-`year`, `currentWeek`, `totalWeeks`, `status` (`active` | `completed`).
-
-### StageRace
-
-`gcStandings[]` — takım bazlı kümülatif puan.
-
-### Staff
-
-`name`, `role`, `experience`, `skillLevel`, `specialization`, `salary`, `morale`, ilişki alanları. `staffTacticBonus()` simülasyonda kullanılır.
+Season: `year`, `currentWeek`, `totalWeeks` (30), `status`  
+StageRace: `gcStandings[]`  
+Staff: skill alanları → `staffTacticBonus()`
 
 ---
 
 ## Yarış motoru cheat sheet
 
-### Taktikler (`GET /api/tactics`)
+### Taktikler
 
-| ID | Kısa etki |
-|----|-----------|
+| ID | Etki |
+|----|------|
 | `balanced` | Nötr |
 | `control` | Tırmanış düşme direnci |
 | `attack` | Hilly/mountain/classic bonus |
@@ -177,101 +173,59 @@ Simülasyon çıktısı: `standings`, `segmentLog`, `narrative`, `tactic`, `ride
 | `sprint_train` | Son düz segment bonus |
 | `climb_pace` | Tırmanış bonus |
 
-### Roller (`GET /api/roles`)
+### Roller
 
-| ID | Kısa etki |
-|----|-----------|
+| ID | Etki |
+|----|------|
 | `leader` | Final segment; max 1/takım |
 | `sprinter` | Düz finish |
 | `climber` | Tırmanış |
-| `domestique` | Lider desteği |
+| `domestique` | Lider desteği + ekstra yorgunluk |
 | `protected` | Tırmanış düşme direnci |
 
-### Rastgele olaylar (segment başına)
+### Rastgele olaylar
 
-`flat_tire`, `mechanical`, `crash`, `illness`, `tailwind`, `perfect_pacing`, `second_wind`, `lucky_break`
+`flat_tire`, `mechanical`, `crash`, `illness`, `tailwind`, `perfect_pacing`, `second_wind`, `lucky_break`  
+(crash/illness → `injuryService`)
 
-### Puan tablosu
+### Puanlar
 
-UCI tarzı: `[25, 20, 16, 14, 12, 10, 8, 6, 4, 2]` → `team.seasonPoints`
+`[25, 20, 16, 14, 12, 10, 8, 6, 4, 2]` → `team.seasonPoints`
 
-### Seed (determinizm)
+### Seed
 
 ```javascript
 const roleKey = Object.values(roles).sort().join('-');
 const seed = `${race._id}-${teamId}-${race.date || ''}-${tactic}-${roleKey}`;
+// injuries: `${seed}-injuries`
 ```
-
-Aynı girdi → aynı simülasyon sonucu.
 
 ---
 
-## API örnekleri
+## Form / fatigue
 
-### Yarışa giriş
+| Olay | Etki |
+|------|------|
+| Yarış bitişi | Pozisyona göre form ± ; mesafe bazlı fatigue ↑ |
+| Rest day `POST /api/cyclists/rest` | fatigue −15, form +2 |
+| Week advance | fatigue −5, form +1 + **payroll** + **development** + injury tick |
+| Injury apply | form −8 (crash) / −4 (illness) |
+| Payroll | season salary / `totalWeeks` bütçeden; yetmezse roster form −2 |
+| Development | genç+potential → skill↑; 33+ → skill↓ (`developmentService.js`) |
 
-```json
-POST /api/races/:id/enter
-{
-  "teamId": "664...",
-  "cyclistIds": ["a", "b", "c"],
-  "tactic": "attack",
-  "roles": { "a": "leader", "b": "domestique", "c": "sprinter" }
-}
-```
-
-Min 3, max 8 bisikletçi. Sakat bisikletçiler reddedilir.
-
-### Transfer imzala
-
-```json
-POST /api/transfers/sign
-{ "teamId": "664...", "cyclistId": "665..." }
-```
-
-Bütçe ve kadro limiti `transferService` içinde kontrol edilir.
-
-### Dinlenme günü
-
-```json
-POST /api/cyclists/rest
-{ "cyclistIds": ["a", "b"] }
-```
-
-Fatigue −15, form +2 (sakat değilse).
-
-### Etap yarışı oluştur
-
-```json
-POST /api/stage-races
-{
-  "name": "Tour Demo",
-  "stages": [
-    { "name": "Stage 1", "distance": 180, "profile": "flat", "seasonWeek": 1 },
-    { "name": "Stage 2", "distance": 150, "profile": "mountain", "seasonWeek": 2 }
-  ]
-}
-```
+Enter sonrası form/fatigue **`Cyclist.updateOne`** ile yazılır. Test: `npm test --prefix backend`.
 
 ---
 
 ## Frontend kuralları
 
-- **Vue 2 Options API** — `data`, `computed`, `methods`, `created`/`mounted`
-- Bileşenler: `PageHeader`, `LoadingState`, `EmptyState`
-- `$ui` helpers (`main.js`'de prototype'a eklenir):
-
-```javascript
-this.$ui.formatDate(date)
-this.$ui.isInjured(cyclist)
-this.$ui.profileBadgeClass('mountain')
-this.$ui.formatMoney(team.budget)
-```
-
-- Router history mode — hash mode'a geçme (sunucu config gerekir)
-- Bootstrap 4 class isimleri (Bootstrap 5 farklı)
-
-### Rota tablosu
+- Vue **2** Options API
+- Bootstrap **4** class isimleri
+- `$ui` helpers: `formatDate`, `isInjured`, `profileBadgeClass`, `formatMoney`, …
+- Ortak: `PageHeader`, `LoadingState`, `EmptyState`
+- History mode router — hash'e geçme
+- Dev: webpack `:8080`, proxy `/api` → `:3000`
+- Prod: Express SPA fallback `frontend/dist/index.html`
 
 | Path | Component |
 |------|-----------|
@@ -290,41 +244,30 @@ this.$ui.formatMoney(team.budget)
 
 ## Kodlama yönergeleri
 
-1. **Minimal diff** — Çevredeki stile uy; drive-by refactor yok.
-2. **Oyun mantığı backend'de** — UI sadece API çıktısını gösterir.
-3. **Determinizmi koru** — `simulateRace` seed/scoring değişirse nedeni belgele.
-4. **Gereksiz dependency ekleme** — Stack bilinçli olarak küçük tutulmuş.
-5. **Vue değişikliği sonrası** — `npm run build --prefix frontend`
-6. **PandaStack 512MB** — `frontend/dist` prebuilt commit gerekebilir.
+1. Minimal diff; drive-by refactor yok.
+2. Oyun mantığı backend'de kalsın.
+3. Seed/scoring değişirse nedeni belgele.
+4. Yeni nested şemada alan adı `type` ise `{ type: String }` kullan.
+5. Vue değişince `npm run build --prefix frontend`.
+6. Secret / `.env` commit etme.
+7. `/health` kaldırma.
 
 ---
 
-## Test (framework olmadan)
+## Testler
 
 ```bash
-# Engine smoke test
-node -e "
-const { simulateRace, normalizeRoles } = require('./backend/services/raceEngine');
-const race = { _id: 'r1', name: 'Test', distance: 180, profile: 'flat', prestige: 50 };
-const riders = [
-  { _id: 'a', name: 'A', sprint: 70, climb: 70, timeTrial: 70, endurance: 70, form: 80, fatigue: 10, teamwork: 60, specialty: 'none' },
-  { _id: 'b', name: 'B', sprint: 65, climb: 65, timeTrial: 65, endurance: 65, form: 75, fatigue: 15, teamwork: 70, specialty: 'none' },
-  { _id: 'c', name: 'C', sprint: 60, climb: 60, timeTrial: 60, endurance: 60, form: 72, fatigue: 12, teamwork: 65, specialty: 'none' },
-];
-const r = simulateRace(race, riders, 'Team', {
-  teamId: 't1',
-  tactic: 'balanced',
-  roles: normalizeRoles(['a','b','c'], { a: 'leader' }),
-});
-console.log('winner:', r.standings[0].name, '| segments:', r.segmentLog.length);
-"
+npm test --prefix backend              # unit + feature (59+)
+npm run test:unit --prefix backend     # DB yok
+npm run test:feature --prefix backend  # mongodb-memory-server
+npm run test:smoke --prefix backend    # legacy quick smoke
 
-# Health check (server çalışırken)
 curl -s http://localhost:3000/health
-
-# Frontend build
 npm run build --prefix frontend
 ```
+
+Layout: `backend/test/unit/*.test.js`, `backend/test/feature/*.test.js` (Node `node:test`).  
+`index.js` exports `{ app, connectDb }` for HTTP tests; listen only when `require.main === module`.
 
 ---
 
@@ -332,45 +275,27 @@ npm run build --prefix frontend
 
 | Yöntem | Not |
 |--------|-----|
-| `npm start` | `MONGODB_URI` + built `frontend/dist` gerekir |
-| Docker | `docker build -t vl .` — frontend imaj içinde build |
-| PandaStack | `pandastack.json`, `/health`, env dashboard |
+| `npm start` | `MONGODB_URI` + built `frontend/dist` |
+| Docker | Multi-stage; port `9999`; HEALTHCHECK `/health` |
+| PandaStack | `pandastack.json`; root `build` sadece backend deps |
 
-Docker: port `9999`, `HEALTHCHECK` `/health`.
+Root `.gitignore` `dist/` içerir — ücretsiz tier prebuilt dist isterse deploy notuna bakın.
 
 ---
 
 ## Faz geçmişi
 
-`main` branch'te **Faz 1–5** tamamlandı:
+Faz 1–5 `main`'de: core engine → segmentler → taktik/olay → sezon/roller → etap/transfer/sakatlık.  
+UI polish (tasarım sistemi, navbar) PR geçmişine bakın.
 
-1. Core engine + kadro kuralları
-2. Segment simülasyonu
-3. Taktikler + rastgele olaylar + segment editörü
-4. Sezon + roller + sıralama
-5. Etap yarışları + transferler + sakatlıklar
-
-UI polish (`cursor/ui-ux-polish-fd4c`, PR #12) henüz `main`'e merge edilmemiş olabilir — tasarım sistemi ve navbar bu branch'te.
-
----
-
-## Kapsam dışı (kullanıcı istemedikçe)
-
-- Vue 3 / TypeScript migration
-- Gerçek zamanlı multiplayer
-- Mobil native uygulama
-- Auth / ödeme sistemleri
-- Kapsamlı unit test coverage
+Kapsam dışı (istenmedikçe): Vue 3, multiplayer, auth, native mobil, büyük test suite.
 
 ---
 
 ## Takılınca
 
-1. `backend/index.js` — ilgili route handler'ı oku
-2. `backend/services/*.js` — iş mantığına in
-3. Mongoose model alan adlarını doğrula (frontend eşleşmeli)
-4. Frontend'de `/api/` grep yap
-5. Log'da `Connected to MongoDB` kontrol et
-
-Genel bakış: **README.md**  
-Otonom agent git/PR: **AGENTS.md**
+1. `backend/index.js` — route handler
+2. `backend/services/*.js` — iş mantığı
+3. `RaceResult` / `Cyclist` şema alan adları (özellikle `type`)
+4. Frontend `/api/` grep
+5. Log: `Connected to MongoDB`

@@ -27,6 +27,40 @@
       </div>
     </div>
 
+    <div v-if="seasonSummary" class="alert alert-success">
+      <h5 class="alert-heading mb-2">Season {{ seasonSummary.champion ? '' : '' }}complete</h5>
+      <p class="mb-2">{{ seasonSummary.headline }}</p>
+      <ul class="mb-2 small" v-if="seasonSummary.champion">
+        <li>
+          <strong>Champion:</strong> {{ seasonSummary.champion.name }}
+          ({{ seasonSummary.champion.seasonPoints }} pts · {{ seasonSummary.champion.wins }} wins)
+        </li>
+        <li v-if="seasonSummary.budgetLeader">
+          <strong>Healthiest budget:</strong> {{ seasonSummary.budgetLeader.name }}
+          ({{ $ui.formatMoney(seasonSummary.budgetLeader.budget) }})
+        </li>
+      </ul>
+      <div class="row small" v-if="seasonSummary.mostImproved && seasonSummary.mostImproved.length">
+        <div class="col-md-6">
+          <strong>Most improved</strong>
+          <ul class="mb-0">
+            <li v-for="r in seasonSummary.mostImproved" :key="'up-' + r.name">
+              {{ r.name }} ({{ r.netDelta > 0 ? '+' : '' }}{{ r.netDelta }})
+            </li>
+          </ul>
+        </div>
+        <div class="col-md-6" v-if="seasonSummary.mostDeclined && seasonSummary.mostDeclined.length">
+          <strong>Fading</strong>
+          <ul class="mb-0">
+            <li v-for="r in seasonSummary.mostDeclined" :key="'down-' + r.name">
+              {{ r.name }} ({{ r.netDelta }})
+            </li>
+          </ul>
+        </div>
+      </div>
+      <router-link to="/" class="btn btn-sm btn-outline-success mt-2">View on home</router-link>
+    </div>
+
     <div v-if="error" class="alert alert-danger alert-dismissible fade show">
       {{ error }}
       <button type="button" class="close" @click="error = ''"><span>&times;</span></button>
@@ -38,6 +72,14 @@
     <div v-if="isCurrentEntryCompleted" class="alert alert-secondary">
       This team already completed the selected race. Pick another race or team.
     </div>
+    <div v-else-if="rivalPreview && rivalPreview.rivalTeamCount" class="alert alert-info py-2">
+      <strong>{{ rivalPreview.rivalTeamCount }} rival team(s)</strong> will start against you:
+      {{ rivalPreview.rivals.map((r) => r.teamName).join(', ') }}.
+      They auto-select a squad and earn season points too.
+    </div>
+    <div v-else-if="rivalPreview && rivalPreview.rivalTeamCount === 0" class="alert alert-light py-2 small">
+      No other rostered teams available — wild-card fillers will pad the peloton.
+    </div>
 
     <div class="form-row mb-3 vl-panel">
       <div class="col-12"><h6 class="text-muted mb-3">Race setup</h6></div>
@@ -46,7 +88,7 @@
         <select id="team" v-model="selectedTeamId" class="form-control" @change="onTeamChange">
           <option disabled value="">Select team</option>
           <option v-for="t in teams" :key="t._id" :value="t._id">
-            {{ t.name }} (wins {{ t.wins || 0 }})
+            {{ t.name }} (wins {{ t.wins || 0 }} · {{ formatBudget(t.budget) }})
           </option>
         </select>
       </div>
@@ -239,7 +281,17 @@ export default {
       submitting: false,
       error: '',
       success: '',
+      rivalPreview: null,
+      seasonSummary: null,
     };
+  },
+  watch: {
+    selectedRaceId() {
+      this.loadRivalPreview();
+    },
+    selectedTeamId() {
+      this.loadRivalPreview();
+    },
   },
   computed: {
     selectedTeam() {
@@ -315,6 +367,19 @@ export default {
       this.riderRoles = {};
       this.restRiderIds = [];
       this.error = '';
+      this.loadRivalPreview();
+    },
+    async loadRivalPreview() {
+      this.rivalPreview = null;
+      if (!this.selectedRaceId || !this.selectedTeamId || this.isCurrentEntryCompleted) return;
+      try {
+        const { data } = await axios.get(`/api/races/${this.selectedRaceId}/rivals`, {
+          params: { teamId: this.selectedTeamId },
+        });
+        this.rivalPreview = data;
+      } catch (err) {
+        this.rivalPreview = null;
+      }
     },
     isSelected(id) {
       return this.selectedRiderIds.includes(id);
@@ -372,6 +437,10 @@ export default {
       const { data } = await axios.get('/api/teams');
       this.teams = data;
     },
+    formatBudget(value) {
+      if (this.$ui && this.$ui.formatMoney) return this.$ui.formatMoney(value);
+      return `$${Number(value || 0).toLocaleString('en-US')}`;
+    },
     async advanceSeason() {
       this.advancingSeason = true;
       this.error = '';
@@ -380,12 +449,29 @@ export default {
         const { data } = await axios.post('/api/season/advance');
         this.season = data.season;
         this.success = data.message;
+        if (data.summary) this.seasonSummary = data.summary;
+        await Promise.all([this.reloadTeams(), this.loadCyclists(), this.loadSeasonSummary()]);
+        if (this.$root && this.$root.$emit) {
+          this.$root.$emit('season-updated', data.season);
+        }
       } catch (err) {
         this.error = (err.response && err.response.data && err.response.data.error)
           || err.message
           || 'Failed to advance season';
       } finally {
         this.advancingSeason = false;
+      }
+    },
+    async loadCyclists() {
+      const { data } = await axios.get('/api/cyclists');
+      this.cyclists = data;
+    },
+    async loadSeasonSummary() {
+      try {
+        const { data } = await axios.get('/api/season/summary');
+        this.seasonSummary = data.complete ? data.summary : null;
+      } catch (err) {
+        this.seasonSummary = null;
       }
     },
     async load() {
@@ -413,6 +499,7 @@ export default {
           (r) => !this.isRaceCompletedForTeam(r._id),
         )?._id || this.races[0]._id;
       }
+      await Promise.all([this.loadRivalPreview(), this.loadSeasonSummary()]);
       } finally {
         this.loading = false;
       }

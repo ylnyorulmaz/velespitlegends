@@ -403,13 +403,15 @@ function rollRandomEvents(active, segment, context) {
 }
 
 function segmentScore(competitor, segmentProfile, context) {
-  const { rng, staffBonus = 0, tactic = 'balanced', segmentMeta = {} } = context;
+  const { rng, segmentMeta = {} } = context;
+  const tactic = competitor.tactic || context.tactic || 'balanced';
+  const staffBonus = competitor.staffBonus != null ? competitor.staffBonus : (context.staffBonus || 0);
   const roll = typeof rng === 'function' ? rng() : Math.random();
   const skill = profileSkill(competitor, segmentProfile);
   const form = num(competitor.form, 70);
   const fatigue = num(competitor.fatigue, 20);
   const varianceRoll = tactic === 'attack' ? roll * 7 : roll * 5;
-  const staffBoost = competitor.isPlayer ? staffBonus * 0.015 : 0;
+  const staffBoost = staffBonus * 0.015;
   const dropPenalty = competitor.dropped ? -20 : 0;
   const tacticBoost = tacticSegmentBonus(competitor, segmentProfile, tactic, segmentMeta);
   const roleBoost = roleSegmentBonus(competitor, segmentProfile, context);
@@ -423,6 +425,8 @@ function toCompetitor(rider, meta = {}) {
     name: rider.name || 'Unknown rider',
     cyclist: meta.cyclist !== undefined ? meta.cyclist : rider._id || null,
     isPlayer: Boolean(meta.isPlayer),
+    teamId: meta.teamId || null,
+    teamName: meta.teamName || (meta.isPlayer ? 'Player' : 'Field'),
     specialty: rider.specialty || 'none',
     sprint: num(rider.sprint),
     climb: num(rider.climb),
@@ -432,6 +436,8 @@ function toCompetitor(rider, meta = {}) {
     fatigue: num(rider.fatigue, 20),
     teamwork: num(rider.teamwork),
     role: meta.role || 'domestique',
+    tactic: normalizeTactic(meta.tactic || 'balanced'),
+    staffBonus: num(meta.staffBonus, 0),
     cumulativeScore: 0,
     dropped: false,
   };
@@ -470,6 +476,7 @@ function resolveSegment(competitors, segment, kmEnd, totalDistance, context) {
   });
 
   const randomRoll = rollRandomEvents(active, segment, context);
+  // Role bonuses use the entering player's squad composition as the reference block
   const playerActive = active.filter((c) => c.isPlayer);
   context.teamComposition = buildTeamComposition(playerActive);
 
@@ -481,14 +488,14 @@ function resolveSegment(competitors, segment, kmEnd, totalDistance, context) {
   scored.sort((a, b) => b.score - a.score);
   const average = scored.reduce((sum, row) => sum + row.score, 0) / (scored.length || 1);
   const hardSegment = segment.profile === 'mountain' || segment.profile === 'hilly';
-  const dropCutoff = dropThreshold(context.tactic, hardSegment);
 
   scored.forEach(({ competitor, score }, index) => {
     competitor.cumulativeScore += score * weight;
 
     const fatigueTick = segment.km / 22 + (hardSegment ? 2 : 0);
     const eventFatigue = competitor.segmentMod ? num(competitor.segmentMod.fatigueDelta, 0) : 0;
-    const domestiqueFatigue = competitor.isPlayer && competitor.role === 'domestique' ? 3 : 0;
+    const domestiqueFatigue = competitor.role === 'domestique' ? 3 : 0;
+    const dropCutoff = dropThreshold(competitor.tactic || context.tactic, hardSegment);
     competitor.fatigue = clamp(
       Math.round(competitor.fatigue + fatigueTick + eventFatigue + domestiqueFatigue),
       0,
@@ -595,13 +602,13 @@ function applyConditionTick(riders, standings, race, competitors) {
 
   for (const rider of riders) {
     const competitor = competitors.find(
-      (c) => c.isPlayer && String(c.cyclist) === String(rider._id),
+      (c) => c.cyclist && String(c.cyclist) === String(rider._id),
     );
     if (competitor) {
       rider.fatigue = competitor.fatigue;
     }
 
-    const row = standings.find((s) => s.isPlayer && String(s.cyclist) === String(rider._id));
+    const row = standings.find((s) => s.cyclist && String(s.cyclist) === String(rider._id));
     const position = row ? row.position : 99;
     const formBefore = num(rider.form, 70);
     const fatigueBefore = num(rider.fatigue, 20);
@@ -647,6 +654,7 @@ function simulateRace(race, riders, teamName, options = {}) {
   const seed = options.seed || `${race._id}-${teamId}-${race.date || ''}-${tactic}-${roleKey}`;
   const rng = createRng(seed);
   const staffBonus = options.staffBonus || 0;
+  const rivalSquads = Array.isArray(options.rivalSquads) ? options.rivalSquads : [];
 
   const segments = buildSegments(race);
   const totalDistance = segments.reduce((sum, segment) => sum + segment.km, 0);
@@ -655,10 +663,43 @@ function simulateRace(race, riders, teamName, options = {}) {
     ...riders.map((rider) => toCompetitor(rider, {
       isPlayer: true,
       cyclist: rider._id,
+      teamId,
+      teamName,
       role: rolesMap[String(rider._id)] || 'domestique',
+      tactic,
+      staffBonus,
     })),
-    ...makeRivals(race.profile || 'flat', rng).map((rival) => toCompetitor(rival, { isPlayer: false })),
   ];
+
+  const allDbRiders = [...riders];
+
+  rivalSquads.forEach((squad) => {
+    const squadRiders = squad.riders || [];
+    squadRiders.forEach((rider) => {
+      allDbRiders.push(rider);
+      competitors.push(toCompetitor(rider, {
+        isPlayer: false,
+        cyclist: rider._id,
+        teamId: squad.teamId,
+        teamName: squad.teamName || 'Rival team',
+        role: (squad.roles && squad.roles[String(rider._id)]) || 'domestique',
+        tactic: squad.tactic || 'balanced',
+        staffBonus: squad.staffBonus || 0,
+      }));
+    });
+  });
+
+  // Pad peloton with procedural riders if few DB rivals
+  const targetField = 8;
+  const padCount = Math.max(0, targetField - Math.max(0, competitors.length - riders.length));
+  if (padCount > 0) {
+    makeRivals(race.profile || 'flat', rng, padCount).forEach((rival) => {
+      competitors.push(toCompetitor(rival, {
+        isPlayer: false,
+        teamName: 'Wild card',
+      }));
+    });
+  }
 
   const riderRoles = riders.map((rider) => ({
     cyclist: rider._id,
@@ -689,6 +730,8 @@ function simulateRace(race, riders, teamName, options = {}) {
       name: competitor.name,
       cyclist: competitor.cyclist,
       isPlayer: competitor.isPlayer,
+      teamId: competitor.teamId,
+      teamName: competitor.teamName,
       score: Math.round(competitor.cumulativeScore * 10) / 10,
       dropped: competitor.dropped,
     }))
@@ -699,13 +742,50 @@ function simulateRace(race, riders, teamName, options = {}) {
     row.points = POINTS[index] || 0;
   });
 
+  assignRaceTimes(standings, race.distance || totalDistance);
+
   const narrative = buildNarrativeFromSegments(
     race, segmentLog, standings, teamName, staffBonus, tactic, riderRoles,
   );
-  const formChanges = applyConditionTick(riders, standings, race, competitors);
+
+  if (rivalSquads.length) {
+    narrative.splice(
+      1,
+      0,
+      `${rivalSquads.length} rival team(s) line up against ${teamName}: ${rivalSquads.map((s) => s.teamName).join(', ')}.`,
+    );
+  }
+
+  const formChanges = applyConditionTick(allDbRiders, standings, race, competitors);
   const teamPointsEarned = standings
     .filter((row) => row.isPlayer)
     .reduce((sum, row) => sum + (row.points || 0), 0);
+
+  const teamResultsMap = new Map();
+  standings.forEach((row) => {
+    if (!row.teamId) return;
+    const key = String(row.teamId);
+    const prev = teamResultsMap.get(key) || {
+      teamId: row.teamId,
+      teamName: row.teamName,
+      isPlayer: Boolean(row.isPlayer),
+      points: 0,
+      bestPosition: row.position,
+      bestTimeSeconds: row.timeSeconds,
+      bestRider: row.name,
+    };
+    prev.points += row.points || 0;
+    if (row.position < prev.bestPosition) {
+      prev.bestPosition = row.position;
+      prev.bestTimeSeconds = row.timeSeconds;
+      prev.bestRider = row.name;
+    }
+    if (row.isPlayer) prev.isPlayer = true;
+    if (row.teamName) prev.teamName = row.teamName;
+    teamResultsMap.set(key, prev);
+  });
+  const teamResults = Array.from(teamResultsMap.values())
+    .sort((a, b) => (a.bestTimeSeconds - b.bestTimeSeconds) || (b.points - a.points));
 
   const summary = narrative.join(' ');
 
@@ -719,6 +799,8 @@ function simulateRace(race, riders, teamName, options = {}) {
     summary,
     formChanges,
     teamPointsEarned,
+    teamResults,
+    rivalTeamCount: rivalSquads.length,
     segmentLog,
     segments,
     seed,
@@ -726,6 +808,21 @@ function simulateRace(race, riders, teamName, options = {}) {
     riderRoles,
     staffBonus: Math.round(staffBonus * 10) / 10,
   };
+}
+
+function assignRaceTimes(standings, distance) {
+  if (!standings.length) return;
+  const baseSeconds = Math.round(num(distance, 180) * 58); // ~58s/km ≈ Tour pace
+  const winnerScore = standings[0].score || 0;
+
+  standings.forEach((row, index) => {
+    const deficit = Math.max(0, winnerScore - (row.score || 0));
+    const gapSeconds = index === 0
+      ? 0
+      : Math.round(deficit * 3.5 + index * 4 + (row.dropped ? 90 : 0));
+    row.gapSeconds = gapSeconds;
+    row.timeSeconds = baseSeconds + gapSeconds;
+  });
 }
 
 function validateRaceSegments(distance, segments) {
@@ -751,6 +848,7 @@ module.exports = {
   raceDifficulty,
   buildSegments,
   raceDayScore,
+  assignRaceTimes,
   TACTICS,
   VALID_TACTICS,
   RIDER_ROLES,

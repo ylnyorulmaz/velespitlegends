@@ -4,7 +4,10 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node test/run.js",
+    "test:unit": "node test/run.js --unit-only",
+    "test:feature": "node test/run.js --feature-only",
+    "test:smoke": "node test/raceEngine.smoke.js"
   },
   "keywords": [],
   "author": "",
@@ -16,7 +19,9 @@
     "mongoose": "^8.4.3"
   },
   "devDependencies": {
-    "nodemon": "^3.1.4"
+    "mongodb-memory-server": "^11.2.0",
+    "nodemon": "^3.1.4",
+    "supertest": "^7.2.2"
   },
   "description": ""
 }
