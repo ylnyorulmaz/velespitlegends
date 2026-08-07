@@ -218,7 +218,7 @@
       @click="enterRace"
     >
       <span v-if="submitting" class="spinner-border spinner-border-sm mr-1" role="status" />
-      {{ submitting ? 'Simulating race…' : 'Enter race' }}
+      {{ submitting ? 'Going to race day…' : 'Start race day' }}
     </button>
 
     <section class="mt-5">
@@ -510,19 +510,18 @@ export default {
       this.error = '';
       this.success = '';
       try {
-        const { data } = await axios.post(`/api/races/${this.selectedRaceId}/enter`, {
+        const { data } = await axios.post(`/api/races/${this.selectedRaceId}/live/start`, {
           teamId: this.selectedTeamId,
           cyclistIds: this.selectedRiderIds,
           tactic: this.selectedTactic,
           roles: this.riderRoles,
         });
-        this.success = 'Race finished — opening result…';
-        await this.load();
-        this.$router.push(`/results/${data._id}`);
+        this.success = 'Race day — opening radio…';
+        this.$router.push(`/race-day/${data.sessionId}`);
       } catch (err) {
         this.error = (err.response && err.response.data && err.response.data.error)
           || err.message
-          || 'Failed to enter race';
+          || 'Failed to start race';
       } finally {
         this.submitting = false;
       }

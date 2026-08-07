@@ -12,6 +12,9 @@ const {
   buildSegments,
   assignRaceTimes,
   VALID_TACTICS,
+  AI_ORDERS_FACTOR,
+  tacticSegmentBonus,
+  roleSegmentBonus,
 } = require('../../services/raceEngine');
 const { ridersTrio, raceFixture } = require('../helpers/fixtures');
 
@@ -133,7 +136,7 @@ describe('raceEngine', () => {
     assert.equal(segments[0].label, 'A');
   });
 
-  it('assignRaceTimes sets winner gap 0 and ascending times', () => {
+  it('assignRaceTimes legacy score path sets winner gap 0', () => {
     const standings = [
       { score: 100, dropped: false },
       { score: 90, dropped: false },
@@ -146,11 +149,59 @@ describe('raceEngine', () => {
     assert.ok(standings[2].gapSeconds > standings[1].gapSeconds);
   });
 
+  it('assignRaceTimes uses accumulated segment race times', () => {
+    const standings = [
+      { name: 'A', cyclist: 'a', score: 50, isPlayer: true },
+      { name: 'B', cyclist: 'b', score: 80, isPlayer: true },
+    ];
+    const competitors = [
+      { name: 'A', cyclist: 'a', isPlayer: true, raceTimeSeconds: 10000 },
+      { name: 'B', cyclist: 'b', isPlayer: true, raceTimeSeconds: 9800 },
+    ];
+    assignRaceTimes(standings, 180, competitors);
+    assert.equal(standings[0].name, 'B');
+    assert.equal(standings[0].timeSeconds, 9800);
+    assert.equal(standings[0].gapSeconds, 0);
+    assert.equal(standings[1].gapSeconds, 200);
+    assert.equal(standings[0].points, 25);
+  });
+
+  it('AI receives weakened tactic/role bonuses', () => {
+    assert.ok(AI_ORDERS_FACTOR > 0 && AI_ORDERS_FACTOR < 1);
+    const player = {
+      isPlayer: true, climb: 90, sprint: 50, teamwork: 70, specialty: 'none', role: 'climber',
+    };
+    const ai = {
+      isPlayer: false, climb: 90, sprint: 50, teamwork: 70, specialty: 'none', role: 'climber',
+      teamId: 'ai1',
+    };
+    const ctx = {
+      segmentMeta: { isLastSegment: false },
+      activeCompetitors: [
+        ai,
+        { isPlayer: false, role: 'domestique', teamId: 'ai1', dropped: false },
+        { isPlayer: false, role: 'leader', teamId: 'ai1', dropped: false },
+      ],
+    };
+    const playerTactic = tacticSegmentBonus(player, 'mountain', 'climb_pace', {});
+    const aiTactic = tacticSegmentBonus(ai, 'mountain', 'climb_pace', {});
+    assert.ok(playerTactic > 0);
+    assert.ok(aiTactic > 0);
+    assert.ok(Math.abs(aiTactic - playerTactic * AI_ORDERS_FACTOR) < 0.001);
+
+    const playerRole = roleSegmentBonus(player, 'mountain', ctx);
+    const aiRole = roleSegmentBonus(ai, 'mountain', ctx);
+    assert.ok(playerRole > 0);
+    assert.ok(aiRole > 0);
+    assert.ok(aiRole < playerRole);
+  });
+
   it('standings include race times and team best times', () => {
     const result = runSim('flat', { seedExtra: '-time' });
     assert.ok(result.standings[0].timeSeconds > 0);
     assert.equal(result.standings[0].gapSeconds, 0);
     assert.ok(result.standings[1].gapSeconds > 0);
+    assert.ok(result.standings[1].timeSeconds > result.standings[0].timeSeconds);
     assert.ok(result.teamResults[0].bestTimeSeconds > 0);
   });
 

@@ -19,6 +19,7 @@ Metin tabanlı bisiklet takım yönetimi simülasyonu. Kadro kurun, taktik ve bi
 | **Transferler** | Serbest oyuncu imzalama / bırakma (bütçe + piyasa değeri) |
 | **Sakatlıklar** | Kaza/hastalık sonrası çok haftalık sakatlık — yarışa çıkamaz |
 | **Yönetim** | Takım, bisikletçi, personel, özel segment editörü, kadro/personel ataması |
+| **Race day (CM)** | Segment segment radyo anlatımı; yarış ortasında taktik değiştirme |
 
 ---
 

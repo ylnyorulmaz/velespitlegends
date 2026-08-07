@@ -1,5 +1,17 @@
 const POINTS = [25, 20, 16, 14, 12, 10, 8, 6, 4, 2];
 
+/** AI gets tactic/role bonuses at this fraction of full player strength. */
+const AI_ORDERS_FACTOR = 0.55;
+
+/** Seconds-per-km baselines by segment profile (Tour-ish stage pace). */
+const PROFILE_PACE_SEC_PER_KM = {
+  flat: 56,
+  hilly: 60,
+  mountain: 72,
+  classic: 62,
+  tt: 50,
+};
+
 const TACTICS = {
   balanced: {
     label: 'Balanced',
@@ -258,18 +270,35 @@ function normalizeRoles(cyclistIds, rolesInput = {}) {
   return map;
 }
 
-function buildTeamComposition(activePlayers) {
-  const domestiquesActive = activePlayers.filter(
+function ordersFactor(competitor) {
+  return competitor && competitor.isPlayer ? 1 : AI_ORDERS_FACTOR;
+}
+
+function buildTeamComposition(squad) {
+  const active = squad || [];
+  const domestiquesActive = active.filter(
     (c) => c.role === 'domestique' && !c.dropped,
   ).length;
-  const hasLeader = activePlayers.some((c) => c.role === 'leader' && !c.dropped);
+  const hasLeader = active.some((c) => c.role === 'leader' && !c.dropped);
   return { domestiquesActive, hasLeader };
 }
 
-function roleSegmentBonus(competitor, segmentProfile, context) {
-  if (!competitor.isPlayer) return 0;
+function squadForCompetitor(competitor, active) {
+  const pool = active || [];
+  if (competitor.teamId) {
+    return pool.filter((c) => c.teamId && String(c.teamId) === String(competitor.teamId));
+  }
+  if (competitor.isPlayer) {
+    return pool.filter((c) => c.isPlayer);
+  }
+  return [competitor];
+}
 
-  const { segmentMeta = {}, teamComposition = {} } = context;
+function roleSegmentBonus(competitor, segmentProfile, context) {
+  const { segmentMeta = {} } = context;
+  const teamComposition = buildTeamComposition(
+    squadForCompetitor(competitor, context.activeCompetitors),
+  );
   const role = competitor.role || 'domestique';
   const isClimbSegment = segmentProfile === 'hilly' || segmentProfile === 'mountain';
   const isFlatSegment = segmentProfile === 'flat';
@@ -298,19 +327,17 @@ function roleSegmentBonus(competitor, segmentProfile, context) {
       break;
   }
 
-  return bonus;
+  return bonus * ordersFactor(competitor);
 }
 
 function roleDropThreshold(competitor, baseThreshold) {
-  if (competitor.isPlayer && competitor.role === 'protected') {
-    return baseThreshold - 0.06;
+  if (competitor.role === 'protected') {
+    return baseThreshold - (0.06 * ordersFactor(competitor));
   }
   return baseThreshold;
 }
 
 function tacticSegmentBonus(competitor, segmentProfile, tactic, segmentMeta = {}) {
-  if (!competitor.isPlayer) return 0;
-
   const teamwork = num(competitor.teamwork);
   const climb = num(competitor.climb);
   const sprint = num(competitor.sprint);
@@ -318,30 +345,75 @@ function tacticSegmentBonus(competitor, segmentProfile, tactic, segmentMeta = {}
   const isClimbSegment = segmentProfile === 'hilly' || segmentProfile === 'mountain';
   const isFlatSegment = segmentProfile === 'flat';
   const isClassic = segmentProfile === 'classic';
+  let bonus = 0;
 
   switch (tactic) {
     case 'control':
-      return teamwork * 0.12 + (isClimbSegment ? 3 : 0);
+      bonus = teamwork * 0.12 + (isClimbSegment ? 3 : 0);
+      break;
     case 'attack':
       if (isClimbSegment || isClassic) {
-        return (specialty === 'breakaway' ? 8 : 4) + teamwork * 0.05;
+        bonus = (specialty === 'breakaway' ? 8 : 4) + teamwork * 0.05;
       }
-      return 0;
+      break;
     case 'defend':
-      return isFlatSegment ? -2 : (isClimbSegment ? 4 : 1);
+      bonus = isFlatSegment ? -2 : (isClimbSegment ? 4 : 1);
+      break;
     case 'sprint_train':
       if (segmentMeta.isLastSegment && isFlatSegment) {
-        return (specialty === 'leadout' || specialty === 'none' ? 10 : 6) + sprint * 0.06;
+        bonus = (specialty === 'leadout' || specialty === 'none' ? 10 : 6) + sprint * 0.06;
+      } else if (isFlatSegment) {
+        bonus = sprint * 0.03;
       }
-      return isFlatSegment ? sprint * 0.03 : 0;
+      break;
     case 'climb_pace':
       if (isClimbSegment) {
-        return (climb >= 75 ? 9 : 5) + climb * 0.04;
+        bonus = (climb >= 75 ? 9 : 5) + climb * 0.04;
       }
-      return 0;
+      break;
     default:
-      return 0;
+      bonus = 0;
   }
+
+  return bonus * ordersFactor(competitor);
+}
+
+function segmentPaceSecPerKm(profile) {
+  return PROFILE_PACE_SEC_PER_KM[profile] || PROFILE_PACE_SEC_PER_KM.flat;
+}
+
+/**
+ * Convert within-segment score gaps into race seconds and accumulate.
+ */
+function applySegmentTimeGaps(scored, segment, totalDistance, kmEnd) {
+  if (!scored.length) return;
+  const winnerScore = scored[0].score || 0;
+  const pace = segmentPaceSecPerKm(segment.profile);
+  const baseSegTime = Math.round(num(segment.km, 0) * pace);
+  const remainingKm = Math.max(0, num(totalDistance, 0) - num(kmEnd, 0));
+
+  scored.forEach(({ competitor, score }, index) => {
+    const deficit = Math.max(0, winnerScore - (score || 0));
+    let gap = 0;
+    if (index > 0) {
+      // Score deficit → seconds; longer/harder sectors stretch gaps
+      gap = Math.round(deficit * (0.85 + num(segment.km, 0) / 90) + index * 2);
+      if (segment.profile === 'mountain') gap = Math.round(gap * 1.15);
+    }
+    if (competitor.dropped) {
+      gap += Math.round(40 + num(segment.km, 0) * 0.45);
+    }
+    competitor.raceTimeSeconds = (competitor.raceTimeSeconds || 0) + baseSegTime + gap;
+  });
+
+  // Riders who just lost contact pay out the remaining race at a slow chase pace
+  scored.forEach(({ competitor }) => {
+    if (!competitor.dropped || competitor.dropTimeApplied) return;
+    competitor.dropTimeApplied = true;
+    if (remainingKm > 0) {
+      competitor.raceTimeSeconds += Math.round(remainingKm * (pace + 18));
+    }
+  });
 }
 
 function dropThreshold(tactic, hardSegment) {
@@ -439,6 +511,8 @@ function toCompetitor(rider, meta = {}) {
     tactic: normalizeTactic(meta.tactic || 'balanced'),
     staffBonus: num(meta.staffBonus, 0),
     cumulativeScore: 0,
+    raceTimeSeconds: 0,
+    dropTimeApplied: false,
     dropped: false,
   };
 }
@@ -476,9 +550,8 @@ function resolveSegment(competitors, segment, kmEnd, totalDistance, context) {
   });
 
   const randomRoll = rollRandomEvents(active, segment, context);
-  // Role bonuses use the entering player's squad composition as the reference block
-  const playerActive = active.filter((c) => c.isPlayer);
-  context.teamComposition = buildTeamComposition(playerActive);
+  // Role bonuses use each rider's own squad (player or AI team)
+  context.activeCompetitors = active;
 
   const scored = active.map((competitor) => ({
     competitor,
@@ -517,6 +590,8 @@ function resolveSegment(competitors, segment, kmEnd, totalDistance, context) {
       events.push(`${competitor.name} is dropped on ${segment.label.toLowerCase()}.`);
     }
   });
+
+  applySegmentTimeGaps(scored, segment, totalDistance, kmEnd);
 
   const leader = scored[0];
   const kmStart = kmEnd - segment.km;
@@ -734,15 +809,9 @@ function simulateRace(race, riders, teamName, options = {}) {
       teamName: competitor.teamName,
       score: Math.round(competitor.cumulativeScore * 10) / 10,
       dropped: competitor.dropped,
-    }))
-    .sort((a, b) => b.score - a.score);
+    }));
 
-  standings.forEach((row, index) => {
-    row.position = index + 1;
-    row.points = POINTS[index] || 0;
-  });
-
-  assignRaceTimes(standings, race.distance || totalDistance);
+  assignRaceTimes(standings, race.distance || totalDistance, competitors);
 
   const narrative = buildNarrativeFromSegments(
     race, segmentLog, standings, teamName, staffBonus, tactic, riderRoles,
@@ -810,16 +879,63 @@ function simulateRace(race, riders, teamName, options = {}) {
   };
 }
 
-function assignRaceTimes(standings, distance) {
-  if (!standings.length) return;
-  const baseSeconds = Math.round(num(distance, 180) * 58); // ~58s/km ≈ Tour pace
-  const winnerScore = standings[0].score || 0;
+function competitorTimeKey(row) {
+  if (row.cyclist != null) return `id:${row.cyclist}`;
+  return `name:${row.name}:${Boolean(row.isPlayer)}`;
+}
 
+/**
+ * Prefer accumulated segment-gap race times (Tour-like).
+ * Falls back to score-derived times for legacy/unit callers.
+ */
+function assignRaceTimes(standings, distance, competitors = null) {
+  if (!standings.length) return;
+
+  const hasAccumulated = Array.isArray(competitors)
+    && competitors.some((c) => (c.raceTimeSeconds || 0) > 0);
+
+  if (hasAccumulated) {
+    const timeByKey = new Map();
+    competitors.forEach((c) => {
+      timeByKey.set(competitorTimeKey(c), Math.round(c.raceTimeSeconds || 0));
+    });
+
+    standings.forEach((row) => {
+      const accumulated = timeByKey.get(competitorTimeKey(row));
+      if (accumulated != null && accumulated > 0) {
+        row.timeSeconds = accumulated;
+      } else {
+        row.timeSeconds = Math.round(num(distance, 180) * 58) + 600;
+      }
+    });
+
+    // Classification by race time; score breaks ties
+    standings.sort((a, b) => {
+      if (a.dropped !== b.dropped) return a.dropped ? 1 : -1;
+      if (a.timeSeconds !== b.timeSeconds) return a.timeSeconds - b.timeSeconds;
+      return (b.score || 0) - (a.score || 0);
+    });
+
+    const leaderTime = standings[0].timeSeconds || 0;
+    standings.forEach((row, index) => {
+      row.position = index + 1;
+      row.points = POINTS[index] || 0;
+      row.gapSeconds = index === 0 ? 0 : Math.max(0, (row.timeSeconds || 0) - leaderTime);
+    });
+    return;
+  }
+
+  // Legacy: derive times from final score order
+  standings.sort((a, b) => (b.score || 0) - (a.score || 0));
+  const baseSeconds = Math.round(num(distance, 180) * 58);
+  const winnerScore = standings[0].score || 0;
   standings.forEach((row, index) => {
     const deficit = Math.max(0, winnerScore - (row.score || 0));
     const gapSeconds = index === 0
       ? 0
       : Math.round(deficit * 3.5 + index * 4 + (row.dropped ? 90 : 0));
+    row.position = index + 1;
+    row.points = POINTS[index] || 0;
     row.gapSeconds = gapSeconds;
     row.timeSeconds = baseSeconds + gapSeconds;
   });
@@ -931,13 +1047,106 @@ function buildCmSegmentFeed(segment, competitors, teamName, tactic) {
   return lines;
 }
 
-function buildCmDecisionPrompt(nextSegment, remaining) {
-  if (!nextSegment) return ['The finish line is in sight — no more changes.'];
-  return [
-    '— Team radio —',
+/**
+ * Sparse decision points: pause before key terrain / finale, or after a crisis.
+ * Everyday flat middle kilometres auto-roll without asking.
+ */
+function isKeySegment(segment, index, total) {
+  if (!segment) return false;
+  if (index === total - 1) return true; // finale
+  const profile = segment.profile || 'flat';
+  if (profile === 'mountain' || profile === 'hilly' || profile === 'classic' || profile === 'tt') {
+    return true;
+  }
+  if (num(segment.km, 0) >= 70) return true;
+  return false;
+}
+
+function detectDecisionCrisis(logEntry, competitors, teamName) {
+  if (!logEntry) return null;
+
+  const playerEvents = (logEntry.randomEvents || []).filter((e) => e.isPlayer);
+  const crash = playerEvents.find((e) => e.type === 'crash' || e.type === 'illness');
+  if (crash) {
+    return {
+      reason: crash.type === 'crash' ? 'crisis_crash' : 'crisis_illness',
+      headline: `${crash.rider} is in trouble — the car needs new orders.`,
+    };
+  }
+
+  const order = currentOrderSnapshot(competitors);
+  const bestPlayer = order.find((r) => r.isPlayer && !r.dropped);
+  const droppedPlayer = order.find((r) => r.isPlayer && r.dropped);
+  if (droppedPlayer) {
+    return {
+      reason: 'crisis_dropped',
+      headline: `${droppedPlayer.name} has been dropped. ${teamName} must rethink the plan.`,
+    };
+  }
+
+  if (bestPlayer && bestPlayer.position >= 12) {
+    return {
+      reason: 'crisis_position',
+      headline: `${bestPlayer.name} has slipped to ${ordinal(bestPlayer.position)}. Time to change approach?`,
+    };
+  }
+
+  const playerMentionDropped = (logEntry.events || []).some(
+    (line) => /is dropped|out of contention/i.test(line)
+      && order.some((r) => r.isPlayer && line.includes(r.name)),
+  );
+  if (playerMentionDropped) {
+    return {
+      reason: 'crisis_dropped',
+      headline: `Contact lost in the peloton — ${teamName} need fresh instructions.`,
+    };
+  }
+
+  return null;
+}
+
+function decisionReasonForSegment(segment, index, total) {
+  if (!segment) return 'opening';
+  if (index === total - 1) return 'finale';
+  if (segment.profile === 'mountain' || segment.profile === 'hilly') return 'climb';
+  if (segment.profile === 'classic') return 'classic';
+  if (segment.profile === 'tt') return 'time_trial';
+  if (num(segment.km, 0) >= 70) return 'long_sector';
+  return 'opening';
+}
+
+function buildCmDecisionPrompt(nextSegment, remaining, decision = null) {
+  if (!nextSegment) {
+    return ['The finish line is in sight — no more changes.'];
+  }
+
+  const reason = (decision && decision.reason) || decisionReasonForSegment(
+    nextSegment,
+    // remaining includes next; index ≈ total - remaining
+    null,
+    null,
+  );
+  const reasonHints = {
+    opening: 'Set your race orders before the flag drops.',
+    climb: 'The road goes up — this is a decisive sector.',
+    finale: 'The finish is coming. Last chance to change orders.',
+    classic: 'Classic roads ahead — positioning will decide it.',
+    time_trial: 'Time-trial kilometres — pure effort from here.',
+    long_sector: 'A long sector looms — commit to a plan.',
+    crisis_crash: 'Crisis in the race — react from the team car.',
+    crisis_illness: 'Medical scare — adapt the plan.',
+    crisis_dropped: 'Riders are losing the bunch — change tactics?',
+    crisis_position: 'You are drifting backwards — new orders?',
+  };
+
+  const lines = ['— Team radio —'];
+  if (decision && decision.headline) lines.push(decision.headline);
+  lines.push(
     `Next: ${nextSegment.label} (${nextSegment.profile}, ${nextSegment.km} km). ${remaining} segment(s) left.`,
-    'Change your race orders from the car, or stick with the plan and roll on.',
-  ];
+  );
+  lines.push(reasonHints[reason] || reasonHints.opening);
+  lines.push('Change your race orders, or stick with the plan and roll on.');
+  return lines;
 }
 
 /**
@@ -1000,7 +1209,11 @@ function createLiveRaceState(race, riders, teamName, options = {}) {
 
   const feed = buildCmIntro(race, teamName, tactic, rivalSquads, riderRoles);
   const next = segments[0];
-  feed.push(...buildCmDecisionPrompt(next, segments.length));
+  const openingDecision = {
+    reason: 'opening',
+    headline: `${teamName} — confirm your race orders before the flag drops.`,
+  };
+  feed.push(...buildCmDecisionPrompt(next, segments.length, openingDecision));
 
   return {
     seed,
@@ -1022,6 +1235,7 @@ function createLiveRaceState(race, riders, teamName, options = {}) {
     segmentIndex: 0,
     rng,
     status: 'awaiting_orders',
+    decision: openingDecision,
     feed,
     tacticHistory: [{ segmentIndex: 0, tactic }],
   };
@@ -1036,27 +1250,7 @@ function applyPlayerTactic(state, rawTactic) {
   return tactic;
 }
 
-function stepLiveRace(state, options = {}) {
-  if (state.status === 'finished') {
-    return { done: true, state, lines: [], standingsPreview: currentOrderSnapshot(state.competitors) };
-  }
-
-  const prevTactic = state.tactic;
-  if (options.tactic != null) {
-    const nextTactic = applyPlayerTactic(state, options.tactic);
-    if (nextTactic !== prevTactic) {
-      state.feed.push(
-        `*** Orders from the car: switch to ${TACTICS[nextTactic].label}. ***`,
-      );
-      state.tacticHistory.push({ segmentIndex: state.segmentIndex, tactic: nextTactic });
-    }
-  }
-
-  if (state.segmentIndex >= state.segments.length) {
-    state.status = 'finished';
-    return { done: true, state, lines: [], standingsPreview: currentOrderSnapshot(state.competitors) };
-  }
-
+function resolveOneLiveSegment(state) {
   const segment = state.segments[state.segmentIndex];
   state.kmCursor += segment.km;
   const context = {
@@ -1078,44 +1272,139 @@ function stepLiveRace(state, options = {}) {
     context,
   );
   state.segmentLog.push(logEntry);
-
   const lines = buildCmSegmentFeed(logEntry, state.competitors, state.teamName, state.tactic);
   state.feed.push(...lines);
   state.segmentIndex += 1;
+  return { logEntry, lines };
+}
 
-  const remaining = state.segments.length - state.segmentIndex;
-  if (remaining > 0) {
-    const decision = buildCmDecisionPrompt(state.segments[state.segmentIndex], remaining);
-    state.feed.push(...decision);
-    state.status = 'awaiting_orders';
+/**
+ * Advance the race. With stopAtDecision (default), auto-rolls quiet sectors
+ * and only pauses for key terrain, the finale, or a crisis.
+ */
+function advanceLiveRace(state, options = {}) {
+  const stopAtDecision = options.stopAtDecision !== false;
+
+  if (state.status === 'finished' || state.status === 'completed') {
     return {
-      done: false,
+      done: true,
       state,
-      lines: [...lines, ...decision],
+      lines: [],
       standingsPreview: currentOrderSnapshot(state.competitors),
-      nextSegment: state.segments[state.segmentIndex],
-      remaining,
+      remaining: 0,
     };
   }
 
+  const prevTactic = state.tactic;
+  const burstLines = [];
+  if (options.tactic != null) {
+    const nextTactic = applyPlayerTactic(state, options.tactic);
+    if (nextTactic !== prevTactic) {
+      const orderLine = `*** Orders from the car: switch to ${TACTICS[nextTactic].label}. ***`;
+      state.feed.push(orderLine);
+      burstLines.push(orderLine);
+      state.tacticHistory.push({ segmentIndex: state.segmentIndex, tactic: nextTactic });
+    }
+  }
+
+  state.decision = null;
+
+  if (state.segmentIndex >= state.segments.length) {
+    state.status = 'finished';
+    return {
+      done: true,
+      state,
+      lines: burstLines,
+      standingsPreview: currentOrderSnapshot(state.competitors),
+      remaining: 0,
+    };
+  }
+
+  // Safety: never infinite-loop
+  let guard = 0;
+  while (state.segmentIndex < state.segments.length && guard < 40) {
+    guard += 1;
+    const { logEntry, lines } = resolveOneLiveSegment(state);
+    burstLines.push(...lines);
+
+    if (state.segmentIndex >= state.segments.length) {
+      state.status = 'finished';
+      state.decision = null;
+      const closing = [
+        '— Finish —',
+        'The race is over. Final classifications coming through…',
+      ];
+      state.feed.push(...closing);
+      burstLines.push(...closing);
+      return {
+        done: true,
+        state,
+        lines: burstLines,
+        standingsPreview: currentOrderSnapshot(state.competitors),
+        remaining: 0,
+      };
+    }
+
+    if (!stopAtDecision) {
+      continue;
+    }
+
+    const remaining = state.segments.length - state.segmentIndex;
+    const nextSegment = state.segments[state.segmentIndex];
+    const crisis = detectDecisionCrisis(logEntry, state.competitors, state.teamName);
+    const upcomingKey = isKeySegment(
+      nextSegment,
+      state.segmentIndex,
+      state.segments.length,
+    );
+
+    if (crisis || upcomingKey) {
+      const decision = crisis || {
+        reason: decisionReasonForSegment(
+          nextSegment,
+          state.segmentIndex,
+          state.segments.length,
+        ),
+        headline: null,
+      };
+      const prompt = buildCmDecisionPrompt(nextSegment, remaining, decision);
+      state.feed.push(...prompt);
+      burstLines.push(...prompt);
+      state.status = 'awaiting_orders';
+      state.decision = decision;
+      return {
+        done: false,
+        state,
+        lines: burstLines,
+        standingsPreview: currentOrderSnapshot(state.competitors),
+        nextSegment,
+        remaining,
+        decision,
+      };
+    }
+
+    const bridge = 'The race rolls on through quieter kilometres…';
+    state.feed.push(bridge);
+    burstLines.push(bridge);
+  }
+
   state.status = 'finished';
-  const closing = [
-    '— Finish —',
-    'The race is over. Final classifications coming through…',
-  ];
-  state.feed.push(...closing);
   return {
     done: true,
     state,
-    lines: [...lines, ...closing],
+    lines: burstLines,
     standingsPreview: currentOrderSnapshot(state.competitors),
     remaining: 0,
   };
 }
 
+function stepLiveRace(state, options = {}) {
+  return advanceLiveRace(state, { ...options, stopAtDecision: true });
+}
+
 function finalizeLiveRace(state) {
   while (state.segmentIndex < state.segments.length) {
-    stepLiveRace(state, {});
+    advanceLiveRace(state, { stopAtDecision: false });
   }
 
   const standings = state.competitors
@@ -1127,15 +1416,9 @@ function finalizeLiveRace(state) {
       teamName: competitor.teamName,
       score: Math.round(competitor.cumulativeScore * 10) / 10,
       dropped: competitor.dropped,
-    }))
-    .sort((a, b) => b.score - a.score);
+    }));
 
-  standings.forEach((row, index) => {
-    row.position = index + 1;
-    row.points = POINTS[index] || 0;
-  });
-
-  assignRaceTimes(standings, state.race.distance || state.totalDistance);
+  assignRaceTimes(standings, state.race.distance || state.totalDistance, state.competitors);
 
   const narrative = state.feed.slice();
   const winner = standings[0];
@@ -1216,6 +1499,7 @@ function publicLiveView(state) {
     segmentTotal: state.segments.length,
     remaining,
     nextSegment: remaining > 0 ? state.segments[state.segmentIndex] : null,
+    decision: state.decision || null,
     raceName: state.race && state.race.name,
     teamName: state.teamName,
     tactics: TACTICS,
@@ -1233,9 +1517,15 @@ module.exports = {
   assignRaceTimes,
   createLiveRaceState,
   stepLiveRace,
+  advanceLiveRace,
   finalizeLiveRace,
   publicLiveView,
   applyPlayerTactic,
+  isKeySegment,
+  detectDecisionCrisis,
+  AI_ORDERS_FACTOR,
+  tacticSegmentBonus,
+  roleSegmentBonus,
   TACTICS,
   VALID_TACTICS,
   RIDER_ROLES,

@@ -10,6 +10,7 @@ import Results from '@/components/Results.vue';
 import Standings from '@/components/Standings.vue';
 import TransferMarket from '@/components/TransferMarket.vue';
 import StageRaceManagement from '@/components/StageRaceManagement.vue';
+import LiveRace from '@/components/LiveRace.vue';
 
 Vue.use(Router);
 
@@ -22,6 +23,7 @@ export default new Router({
     { path: '/races', component: RaceManagement },
     { path: '/staff', component: StaffManagement },
     { path: '/calendar', component: Calendar },
+    { path: '/race-day/:sessionId', component: LiveRace },
     { path: '/standings', component: Standings },
     { path: '/transfers', component: TransferMarket },
     { path: '/stage-races', component: StageRaceManagement },
